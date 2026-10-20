@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Imágenes de prueba y resultados
+inputs/
+outputs/
+
+# Variables de entorno
+.env
+.env.*
+!.env.example
+
+# Credenciales de Google
+credentials.json
+token.json
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
