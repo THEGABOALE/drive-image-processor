@@ -17,6 +17,22 @@ def _get_session(model_name: str):
     return new_session(model_name)
 
 
+
+def prepare_model(model_name: str) -> None:
+    """
+    Carga el modelo y deja su sesión preparada.
+
+    Permite medir el tiempo de inicialización
+    independientemente del procesamiento.
+    """
+    if model_name not in SUPPORTED_MODELS:
+        raise ValueError(
+            f"Modelo no permitido: {model_name}"
+        )
+
+    _get_session(model_name)
+
+
 def remove_background(
         image: Image.Image,
         model_name: str = "isnet-general-use",
