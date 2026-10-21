@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from .atomic_write import remove_stale_temp_files, save_png_exclusive
 from .pipeline import process_image
 
 
@@ -18,6 +19,7 @@ class BatchResult:
     skipped: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
+    temp_removed: int = 0
 
 
 def process_folder(
@@ -25,6 +27,12 @@ def process_folder(
     output_dir: Path | None = None,
     model_name: str = "isnet-general-use",
 ) -> BatchResult:
+    """
+    Procesa las imágenes de una carpeta.
+
+    Origen y destino pueden ser la misma carpeta.
+    No se admiten lotes concurrentes sobre el mismo destino.
+    """
 
     input_dir = Path(input_dir)
 
@@ -43,6 +51,11 @@ def process_folder(
 
     summary = BatchResult()
     reserved_names = set()
+
+    # Restos de ejecuciones interrumpidas.
+    summary.temp_removed = remove_stale_temp_files(
+        output_dir, prefix="TRANSFORMADA_"
+    )
 
     for file in sorted(input_dir.iterdir()):
 
@@ -75,8 +88,6 @@ def process_folder(
             summary.skipped += 1
             continue
 
-        created = False
-
         try:
             with Image.open(file) as image:
                 result = process_image(
@@ -84,10 +95,9 @@ def process_folder(
                     model_name=model_name,
                 )
 
-            # "xb" impide sobrescribir archivos existentes.
-            with output_path.open("xb") as target:
-                created = True
-                result.save(target, format="PNG")
+            # Publicación atómica: nunca sobrescribe
+            # ni deja resultados parciales.
+            save_png_exclusive(result, output_path)
 
             summary.processed += 1
             print(f"[OK] {file.name}")
@@ -96,9 +106,6 @@ def process_folder(
             summary.skipped += 1
 
         except Exception as exc:
-            if created:
-                output_path.unlink(missing_ok=True)
-
             summary.failed += 1
             summary.errors.append(
                 f"{file.name}: {exc}"
