@@ -10,6 +10,10 @@ SUPPORTED_MODELS = [
 ]
 
 
+class ModelInitializationError(RuntimeError):
+    """El modelo de IA no pudo descargarse o inicializarse."""
+
+
 @lru_cache(maxsize=1)
 def _get_session(model_name: str):
     """Reutiliza la sesión del modelo de IA."""
@@ -24,13 +28,22 @@ def prepare_model(model_name: str) -> None:
 
     Permite medir el tiempo de inicialización
     independientemente del procesamiento.
+
+    Un fallo no queda en caché: la siguiente
+    llamada vuelve a intentarlo.
     """
     if model_name not in SUPPORTED_MODELS:
         raise ValueError(
             f"Modelo no permitido: {model_name}"
         )
 
-    _get_session(model_name)
+    try:
+        _get_session(model_name)
+    except Exception as exc:
+        raise ModelInitializationError(
+            f"No se pudo inicializar el modelo "
+            f"'{model_name}': {exc}"
+        ) from exc
 
 
 def remove_background(

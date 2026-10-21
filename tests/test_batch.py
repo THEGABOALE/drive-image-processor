@@ -6,7 +6,8 @@ import time
 import pytest
 from PIL import Image
 
-from image_processor import batch
+from image_processor import background_removal, batch, pipeline
+from image_processor.background_removal import ModelInitializationError
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +20,25 @@ def mock_ai(monkeypatch):
     monkeypatch.setattr(
         batch, "process_image", fake_process
     )
+
+    monkeypatch.setattr(
+        batch, "prepare_model", lambda model_name: None
+    )
+
+
+@pytest.fixture
+def real_model_init(monkeypatch):
+    """Usa la inicialización real con new_session simulado."""
+
+    background_removal._get_session.cache_clear()
+
+    monkeypatch.setattr(
+        batch, "prepare_model", background_removal.prepare_model
+    )
+
+    yield
+
+    background_removal._get_session.cache_clear()
 
 
 def test_batch_preserves_original(tmp_path):
@@ -186,3 +206,156 @@ def test_batch_continues_after_disk_full(tmp_path, monkeypatch):
     assert not (tmp_path / "TRANSFORMADA_a.png").exists()
     assert list(tmp_path.glob("*.tmp")) == []
     assert_valid_png(tmp_path / "TRANSFORMADA_b.png")
+
+
+def make_images(directory, names):
+    originals = {}
+
+    for name in names:
+        path = directory / name
+        Image.new("RGB", (50, 50), "red").save(path)
+        originals[path] = path.read_bytes()
+
+    return originals
+
+
+def failing_new_session(attempts):
+    def fake_new_session(model_name):
+        attempts.append(model_name)
+        raise OSError("SSL: CERTIFICATE_VERIFY_FAILED (simulado)")
+
+    return fake_new_session
+
+
+def test_model_failure_is_attempted_once_per_batch(
+    tmp_path, monkeypatch, real_model_init
+):
+    make_images(tmp_path, [f"p{i}.jpg" for i in range(5)])
+
+    attempts = []
+    processed = []
+
+    monkeypatch.setattr(
+        background_removal,
+        "new_session",
+        failing_new_session(attempts),
+    )
+    monkeypatch.setattr(
+        batch,
+        "process_image",
+        lambda image, model_name: processed.append(image),
+    )
+
+    with pytest.raises(
+        ModelInitializationError, match="isnet-general-use"
+    ):
+        batch.process_folder(tmp_path)
+
+    assert attempts == ["isnet-general-use"]
+    assert processed == []
+
+
+def test_model_failure_creates_no_outputs_and_preserves_originals(
+    tmp_path, monkeypatch, real_model_init
+):
+    originals = make_images(tmp_path, ["a.jpg", "b.png", "c.webp"])
+
+    monkeypatch.setattr(
+        background_removal,
+        "new_session",
+        failing_new_session([]),
+    )
+
+    # Misma carpeta como origen y destino.
+    with pytest.raises(ModelInitializationError) as error:
+        batch.process_folder(tmp_path, output_dir=tmp_path)
+
+    assert isinstance(error.value.__cause__, OSError)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "a.jpg", "b.png", "c.webp",
+    ]
+
+    for path, content in originals.items():
+        assert path.read_bytes() == content
+
+
+def test_batch_without_pending_images_skips_model_init(
+    tmp_path, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(batch, "prepare_model", calls.append)
+
+    (tmp_path / "notas.txt").write_text("No es una imagen")
+
+    result = batch.process_folder(tmp_path)
+
+    assert calls == []
+    assert (result.processed, result.skipped, result.failed) == (0, 0, 0)
+
+
+def test_batch_with_existing_results_skips_model_init(
+    tmp_path, monkeypatch
+):
+    make_images(tmp_path, ["a.jpg", "b.jpg"])
+    batch.process_folder(tmp_path)
+
+    calls = []
+    monkeypatch.setattr(batch, "prepare_model", calls.append)
+
+    result = batch.process_folder(tmp_path)
+
+    assert calls == []
+    assert result.processed == 0
+    assert result.skipped == 2
+
+
+def test_batch_prepares_selected_model_once(tmp_path, monkeypatch):
+    make_images(tmp_path, ["a.jpg", "b.jpg", "c.jpg"])
+
+    calls = []
+    monkeypatch.setattr(batch, "prepare_model", calls.append)
+
+    result = batch.process_folder(
+        tmp_path, model_name="birefnet-general-lite"
+    )
+
+    assert calls == ["birefnet-general-lite"]
+    assert result.processed == 3
+
+
+def test_initialized_session_is_reused_during_batch(
+    tmp_path, monkeypatch, real_model_init
+):
+    make_images(tmp_path, ["a.jpg", "b.jpg", "c.jpg"])
+
+    sessions = []
+    used = []
+
+    def fake_new_session(model_name):
+        session = object()
+        sessions.append(session)
+        return session
+
+    def fake_remove(image, session):
+        used.append(session)
+        cutout = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        cutout.paste((255, 0, 0, 255), (10, 10, 40, 40))
+        return cutout
+
+    monkeypatch.setattr(
+        background_removal, "new_session", fake_new_session
+    )
+    monkeypatch.setattr(background_removal, "remove", fake_remove)
+    monkeypatch.setattr(
+        batch, "process_image", pipeline.process_image
+    )
+
+    result = batch.process_folder(tmp_path)
+
+    assert result.processed == 3
+    assert len(sessions) == 1
+    assert used == sessions * 3
+
+    for name in ("a", "b", "c"):
+        assert_valid_png(tmp_path / f"TRANSFORMADA_{name}.png")

@@ -2,7 +2,10 @@ import argparse
 import sys
 from pathlib import Path
 
-from .background_removal import SUPPORTED_MODELS
+from .background_removal import (
+    SUPPORTED_MODELS,
+    ModelInitializationError,
+)
 from .batch import process_folder
 
 
@@ -42,6 +45,14 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output,
             model_name=args.model,
         )
+    except ModelInitializationError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        print(
+            "No se procesó ninguna imagen. "
+            "Verifique la conexión de red o la caché de modelos.",
+            file=sys.stderr,
+        )
+        return 3
     except (OSError, ValueError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 2

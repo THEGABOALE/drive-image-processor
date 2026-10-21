@@ -5,6 +5,7 @@ from pathlib import Path
 from PIL import Image
 
 from .atomic_write import remove_stale_temp_files, save_png_exclusive
+from .background_removal import prepare_model
 from .pipeline import process_image
 
 
@@ -32,6 +33,10 @@ def process_folder(
 
     Origen y destino pueden ser la misma carpeta.
     No se admiten lotes concurrentes sobre el mismo destino.
+
+    El modelo se inicializa una sola vez y solo si hay
+    imágenes pendientes. Si falla, se lanza
+    ModelInitializationError antes de procesar fotografías.
     """
 
     input_dir = Path(input_dir)
@@ -51,6 +56,7 @@ def process_folder(
 
     summary = BatchResult()
     reserved_names = set()
+    pending = []
 
     # Restos de ejecuciones interrumpidas.
     summary.temp_removed = remove_stale_temp_files(
@@ -88,6 +94,13 @@ def process_folder(
             summary.skipped += 1
             continue
 
+        pending.append((file, output_path))
+
+    # Una sola inicialización por lote, antes de procesar.
+    if pending:
+        prepare_model(model_name)
+
+    for file, output_path in pending:
         try:
             with Image.open(file) as image:
                 result = process_image(

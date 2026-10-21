@@ -73,3 +73,67 @@ def test_pipeline_creates_white_background(monkeypatch):
     assert result.mode == "RGB"
     assert result.getpixel((0, 0)) == (255, 255, 255)
     assert result.getpixel((200, 200)) == (255, 0, 0)
+
+
+def test_prepare_model_wraps_initialization_errors(monkeypatch):
+    background_removal._get_session.cache_clear()
+
+    error = OSError("SSL: CERTIFICATE_VERIFY_FAILED (simulado)")
+
+    def failing_new_session(model_name):
+        raise error
+
+    monkeypatch.setattr(
+        background_removal, "new_session", failing_new_session
+    )
+
+    try:
+        with pytest.raises(
+            background_removal.ModelInitializationError,
+            match="isnet-general-use",
+        ) as raised:
+            background_removal.prepare_model("isnet-general-use")
+
+        assert raised.value.__cause__ is error
+    finally:
+        background_removal._get_session.cache_clear()
+
+
+def test_prepare_model_failure_is_not_cached(monkeypatch):
+    background_removal._get_session.cache_clear()
+
+    attempts = []
+
+    def flaky_new_session(model_name):
+        attempts.append(model_name)
+        if len(attempts) == 1:
+            raise OSError("Red no disponible")
+        return object()
+
+    monkeypatch.setattr(
+        background_removal, "new_session", flaky_new_session
+    )
+
+    try:
+        with pytest.raises(background_removal.ModelInitializationError):
+            background_removal.prepare_model("isnet-general-use")
+
+        # Un lote posterior puede reintentar.
+        background_removal.prepare_model("isnet-general-use")
+        background_removal.prepare_model("isnet-general-use")
+
+        assert len(attempts) == 2
+    finally:
+        background_removal._get_session.cache_clear()
+
+
+def test_prepare_model_rejects_unknown_model(monkeypatch):
+    attempts = []
+    monkeypatch.setattr(
+        background_removal, "new_session", attempts.append
+    )
+
+    with pytest.raises(ValueError, match="Modelo no permitido"):
+        background_removal.prepare_model("modelo_inexistente")
+
+    assert attempts == []
