@@ -66,3 +66,88 @@ def test_fully_transparent_image():
     assert result.size == (400, 400)
     assert result.getpixel((200, 200)) == (255, 255, 255)
 
+
+def test_low_alpha_noise_does_not_shift_center():
+    image = Image.new(
+        "RGBA", (300, 200), (0, 0, 0, 0)
+    )
+
+    # Producto completamente opaco.
+    image.paste(
+        (255, 0, 0, 255),
+        (20, 70, 100, 130),
+    )
+
+    # Residuo casi invisible lejos del producto.
+    image.putpixel(
+        (290, 15), (0, 0, 0, 1)
+    )
+
+    result = normalize_image(
+        image,
+        alpha_threshold=16,
+    )
+
+    red_pixels = [
+        (x, y)
+        for y in range(400)
+        for x in range(400)
+        if (
+            result.getpixel((x, y))[0] > 230
+            and result.getpixel((x, y))[1] < 60
+            and result.getpixel((x, y))[2] < 60
+        )
+    ]
+
+    assert red_pixels
+
+    xs = [point[0] for point in red_pixels]
+    ys = [point[1] for point in red_pixels]
+
+    center_x = (min(xs) + max(xs)) / 2
+    center_y = (min(ys) + max(ys)) / 2
+
+    assert abs(center_x - 199.5) <= 3
+    assert abs(center_y - 199.5) <= 3
+
+
+def test_faint_translucent_object_is_preserved():
+    image = Image.new(
+        "RGBA", (80, 80), (0, 0, 0, 0)
+    )
+
+    image.paste(
+        (0, 0, 255, 10),
+        (20, 20, 60, 60),
+    )
+
+    result = normalize_image(
+        image,
+        alpha_threshold=16,
+    )
+
+    # El objeto casi transparente no debe desaparecer.
+    center = result.getpixel((200, 200))
+
+    assert center[2] == 255
+    assert center[0] < 255
+    assert center[1] < 255
+
+
+@pytest.mark.parametrize(
+    "threshold",
+    [-1, 255],
+)
+def test_invalid_alpha_threshold(threshold):
+    image = Image.new(
+        "RGBA", (100, 100), "red"
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="umbral alfa",
+    ):
+        normalize_image(
+            image,
+            alpha_threshold=threshold,
+        )
