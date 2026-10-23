@@ -118,6 +118,11 @@ def main(argv: list[str] | None = None) -> int:
         for error in result.errors:
             print(f"  - {error}", file=sys.stderr)
 
+    if result.warnings:
+        print("\nAdvertencias:")
+        for warning in result.warnings:
+            print(f"  - {warning}", file=sys.stderr)
+
     return 1 if result.failed else 0
 
 

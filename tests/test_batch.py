@@ -2,6 +2,7 @@
 import errno
 import os
 import time
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -650,3 +651,323 @@ def test_empty_segmentation_can_be_retried(tmp_path, monkeypatch):
 
     for path, content in originals.items():
         assert path.read_bytes() == content
+
+
+SAME_STEM_COLORS = {
+    "producto.jpg": (220, 30, 30),
+    "producto.png": (30, 200, 30),
+    "producto.webp": (30, 30, 220),
+}
+
+
+def make_colored(directory, colors):
+    originals = {}
+
+    for name, color in colors.items():
+        path = directory / name
+        Image.new("RGB", (60, 60), color).save(path)
+        originals[path] = path.read_bytes()
+
+    return originals
+
+
+def color_copy_process(image, model_name, options=None):
+    """Resultado del color del original: revela qué original lo generó."""
+
+    options = options or OutputOptions()
+    color = image.convert("RGB").getpixel((30, 30))
+    mode = "RGBA" if options.background == "transparent" else "RGB"
+    fill = color + (255,) if mode == "RGBA" else color
+
+    return Image.new(mode, (options.width, options.height), fill)
+
+
+def assert_output_color(path, color, size=(400, 400)):
+    with Image.open(path) as image:
+        image.load()
+        assert image.format == "PNG"
+        assert image.size == size
+        pixel = image.convert("RGB").getpixel((size[0] // 2, size[1] // 2))
+
+    # JPEG y WebP comprimen con pérdida.
+    assert all(abs(a - b) <= 12 for a, b in zip(pixel, color))
+
+
+def test_same_stem_originals_get_independent_outputs(tmp_path, monkeypatch):
+    originals = make_colored(tmp_path, SAME_STEM_COLORS)
+    monkeypatch.setattr(batch, "process_image", color_copy_process)
+
+    # Misma carpeta como origen y destino.
+    result = batch.process_folder(tmp_path)
+
+    assert (result.processed, result.skipped, result.failed) == (3, 0, 0)
+    assert result.warnings == []
+
+    for name, color in SAME_STEM_COLORS.items():
+        tag = name.rsplit(".", 1)[1]
+        assert_output_color(
+            tmp_path / f"TRANSFORMADA_producto__src-{tag}.png", color
+        )
+
+    assert not (tmp_path / "TRANSFORMADA_producto.png").exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+    for path, content in originals.items():
+        assert path.read_bytes() == content
+
+
+def test_two_same_stem_originals_with_variants(tmp_path, monkeypatch):
+    colors = {
+        "producto.jpg": SAME_STEM_COLORS["producto.jpg"],
+        "producto.png": SAME_STEM_COLORS["producto.png"],
+    }
+    originals = make_colored(tmp_path, colors)
+    monkeypatch.setattr(batch, "process_image", color_copy_process)
+
+    variants = [
+        OutputOptions(),
+        OutputOptions(background="transparent"),
+        OutputOptions(800, 600, "white"),
+        OutputOptions(800, 600, "transparent"),
+    ]
+
+    for options in variants:
+        result = batch.process_folder(tmp_path, options=options)
+        assert (result.processed, result.failed) == (2, 0)
+
+    outputs = sorted(
+        path.name for path in tmp_path.glob("TRANSFORMADA_*.png")
+    )
+
+    assert outputs == sorted([
+        "TRANSFORMADA_producto__src-jpg.png",
+        "TRANSFORMADA_producto__src-png.png",
+        "TRANSFORMADA_producto__src-jpg__400x400_transparent.png",
+        "TRANSFORMADA_producto__src-png__400x400_transparent.png",
+        "TRANSFORMADA_producto__src-jpg__800x600_white.png",
+        "TRANSFORMADA_producto__src-png__800x600_white.png",
+        "TRANSFORMADA_producto__src-jpg__800x600_transparent.png",
+        "TRANSFORMADA_producto__src-png__800x600_transparent.png",
+    ])
+
+    assert_output_color(
+        tmp_path / "TRANSFORMADA_producto__src-png__800x600_white.png",
+        colors["producto.png"],
+        size=(800, 600),
+    )
+
+    snapshot = {
+        path: path.read_bytes() for path in tmp_path.glob("TRANSFORMADA_*")
+    }
+
+    # Ejecución repetida: todo se omite y nada cambia.
+    calls = []
+    monkeypatch.setattr(batch, "prepare_model", calls.append)
+
+    for options in variants:
+        result = batch.process_folder(tmp_path, options=options)
+        assert (result.processed, result.skipped, result.failed) == (0, 2, 0)
+
+    assert calls == []
+
+    for path, content in snapshot.items():
+        assert path.read_bytes() == content
+
+    for path, content in originals.items():
+        assert path.read_bytes() == content
+
+
+def test_existing_same_stem_output_is_not_overwritten(tmp_path, monkeypatch):
+    make_colored(tmp_path, SAME_STEM_COLORS)
+    monkeypatch.setattr(batch, "process_image", color_copy_process)
+
+    existing = tmp_path / "TRANSFORMADA_producto__src-png.png"
+    existing.write_bytes(b"PREVIO")
+
+    result = batch.process_folder(tmp_path)
+
+    assert (result.processed, result.skipped, result.failed) == (2, 1, 0)
+    assert existing.read_bytes() == b"PREVIO"
+
+
+def test_existing_output_with_other_case_is_skipped(tmp_path, monkeypatch):
+    make_colored(tmp_path, {"producto.jpg": (220, 30, 30)})
+    monkeypatch.setattr(batch, "process_image", color_copy_process)
+
+    existing = tmp_path / "transformada_PRODUCTO.png"
+    existing.write_bytes(b"PREVIO")
+
+    calls = []
+    monkeypatch.setattr(batch, "prepare_model", calls.append)
+
+    result = batch.process_folder(tmp_path)
+
+    assert (result.processed, result.skipped) == (0, 1)
+    assert calls == []
+    assert existing.read_bytes() == b"PREVIO"
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "producto.jpg", "transformada_PRODUCTO.png",
+    ]
+
+
+def test_collision_does_not_process_other_image_wrongly(
+    tmp_path, monkeypatch
+):
+    colors = {
+        "producto.jpg": (220, 30, 30),
+        "producto.png": (30, 200, 30),
+        "producto__src-jpg.png": (30, 30, 220),
+    }
+    originals = make_colored(tmp_path, colors)
+    monkeypatch.setattr(batch, "process_image", color_copy_process)
+
+    result = batch.process_folder(tmp_path)
+
+    assert (result.processed, result.skipped, result.failed) == (1, 0, 2)
+
+    failed = sorted(error.split(":", 1)[0] for error in result.errors)
+    assert failed == ["producto.jpg", "producto__src-jpg.png"]
+    assert all("Renombre" in error for error in result.errors)
+
+    # Solo producto.png obtiene su propio resultado.
+    assert sorted(path.name for path in tmp_path.glob("TRANSFORMADA_*")) == [
+        "TRANSFORMADA_producto__src-png.png"
+    ]
+    assert_output_color(
+        tmp_path / "TRANSFORMADA_producto__src-png.png", colors["producto.png"]
+    )
+    assert list(tmp_path.glob("*.tmp")) == []
+
+    for path, content in originals.items():
+        assert path.read_bytes() == content
+
+
+def test_only_collisions_do_not_initialize_model(tmp_path, monkeypatch):
+    make_colored(
+        tmp_path,
+        {"producto.jpg": (220, 30, 30), "producto__src-jpg.png": (1, 2, 3)},
+    )
+    make_colored(tmp_path, {"producto.png": (30, 200, 30)})
+    (tmp_path / "TRANSFORMADA_producto__src-png.png").write_bytes(b"PREVIO")
+
+    calls = []
+    monkeypatch.setattr(batch, "prepare_model", calls.append)
+
+    result = batch.process_folder(tmp_path)
+
+    assert (result.processed, result.skipped, result.failed) == (0, 1, 2)
+    assert calls == []
+
+
+def test_new_original_makes_historic_result_ambiguous(
+    tmp_path, monkeypatch
+):
+    make_colored(tmp_path, {"producto.jpg": (220, 30, 30)})
+    monkeypatch.setattr(batch, "process_image", color_copy_process)
+
+    first = batch.process_folder(tmp_path)
+    historic = tmp_path / "TRANSFORMADA_producto.png"
+    historic_bytes = historic.read_bytes()
+
+    assert first.processed == 1
+
+    make_colored(tmp_path, {"producto.png": (30, 200, 30)})
+
+    second = batch.process_folder(tmp_path)
+
+    assert (second.processed, second.skipped, second.failed) == (2, 0, 0)
+    assert len(second.warnings) == 1
+    assert "TRANSFORMADA_producto.png" in second.warnings[0]
+    assert historic.read_bytes() == historic_bytes
+
+    assert_output_color(
+        tmp_path / "TRANSFORMADA_producto__src-jpg.png", (220, 30, 30)
+    )
+    assert_output_color(
+        tmp_path / "TRANSFORMADA_producto__src-png.png", (30, 200, 30)
+    )
+
+
+def test_removed_original_does_not_inherit_historic_result(
+    tmp_path, monkeypatch
+):
+    # Primera ejecución solo con producto.png: genera el histórico.
+    make_colored(tmp_path, {"producto.png": (30, 200, 30)})
+    monkeypatch.setattr(batch, "process_image", color_copy_process)
+    batch.process_folder(tmp_path)
+
+    # Aparece producto.jpg: ambos usan __src-.
+    make_colored(tmp_path, {"producto.jpg": (220, 30, 30)})
+    batch.process_folder(tmp_path)
+
+    # Se elimina producto.png: el histórico (verde) no debe
+    # atribuirse a producto.jpg (rojo).
+    (tmp_path / "producto.png").unlink()
+
+    result = batch.process_folder(tmp_path)
+
+    assert (result.processed, result.skipped, result.failed) == (0, 1, 0)
+    assert len(result.warnings) == 1
+    assert_output_color(
+        tmp_path / "TRANSFORMADA_producto__src-jpg.png", (220, 30, 30)
+    )
+
+    # Aunque falte su propio resultado, producto.jpg se regenera
+    # en vez de darse por procesado con el histórico verde.
+    (tmp_path / "TRANSFORMADA_producto__src-jpg.png").unlink()
+
+    result = batch.process_folder(tmp_path)
+
+    assert (result.processed, result.skipped, result.failed) == (1, 0, 0)
+    assert_output_color(
+        tmp_path / "TRANSFORMADA_producto__src-jpg.png", (220, 30, 30)
+    )
+    assert_output_color(
+        tmp_path / "TRANSFORMADA_producto.png", (30, 200, 30)
+    )
+
+
+def test_discovery_order_does_not_change_processing(
+    tmp_path, monkeypatch
+):
+    colors = {
+        "producto.jpg": (220, 30, 30),
+        "producto.png": (30, 200, 30),
+        "Banner.webp": (30, 30, 220),
+        "zeta.jpeg": (200, 200, 30),
+    }
+
+    runs = []
+    real_discover = batch._discover_sources
+
+    for reverse in (False, True):
+        directory = tmp_path / f"orden_{reverse}"
+        directory.mkdir()
+        make_colored(directory, colors)
+
+        order = []
+
+        def recording_process(image, model_name, options=None):
+            order.append(Path(image.filename).name)
+            return color_copy_process(image, model_name, options)
+
+        def discover(input_dir, reverse=reverse):
+            found = sorted(real_discover(input_dir), key=lambda p: p.name)
+            return list(reversed(found)) if reverse else found
+
+        monkeypatch.setattr(batch, "_discover_sources", discover)
+        monkeypatch.setattr(batch, "process_image", recording_process)
+
+        result = batch.process_folder(directory)
+
+        runs.append((
+            order,
+            sorted(path.name for path in directory.glob("TRANSFORMADA_*")),
+            result,
+        ))
+
+    assert runs[0][0] == runs[1][0] == [
+        "Banner.webp", "producto.jpg", "producto.png", "zeta.jpeg",
+    ]
+    assert runs[0][1] == runs[1][1]
+    assert runs[0][2] == runs[1][2]

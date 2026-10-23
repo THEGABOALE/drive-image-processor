@@ -251,3 +251,40 @@ def test_cli_reports_empty_segmentation(
 
     for path, content in originals.items():
         assert path.read_bytes() == content
+
+
+def test_cli_reports_ambiguous_historic_result(tmp_path, monkeypatch, capsys):
+    for name in ("producto.jpg", "producto.png"):
+        Image.new("RGB", (50, 50), "red").save(tmp_path / name)
+
+    historic = tmp_path / "TRANSFORMADA_producto.png"
+    historic.write_bytes(b"PREVIO")
+
+    monkeypatch.setattr(batch, "process_image", fake_process)
+
+    exit_code = batch_cli.main(["--input", str(tmp_path)])
+
+    captured = capsys.readouterr()
+
+    # Una advertencia no es un fallo.
+    assert exit_code == 0
+    assert "Procesadas: 2" in captured.out
+    assert "Advertencias:" in captured.out
+    assert "TRANSFORMADA_producto.png: resultado ambiguo" in captured.err
+    assert historic.read_bytes() == b"PREVIO"
+
+
+def test_cli_reports_unresolvable_collision(tmp_path, monkeypatch, capsys):
+    for name in ("producto.jpg", "producto.png", "producto__src-jpg.png"):
+        Image.new("RGB", (50, 50), "red").save(tmp_path / name)
+
+    monkeypatch.setattr(batch, "process_image", fake_process)
+
+    exit_code = batch_cli.main(["--input", str(tmp_path)])
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Procesadas: 1" in captured.out
+    assert "Fallidas:   2" in captured.out
+    assert captured.err.count("Renombre uno de los originales") == 2
