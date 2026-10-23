@@ -275,8 +275,12 @@ def test_cli_reports_ambiguous_historic_result(tmp_path, monkeypatch, capsys):
 
 
 def test_cli_reports_unresolvable_collision(tmp_path, monkeypatch, capsys):
-    for name in ("producto.jpg", "producto.png", "producto__src-jpg.png"):
+    # Mismo nombre en NFC y NFD: NTFS los admite juntos.
+    for name in ("café.png", "café.png", "otro.png"):
         Image.new("RGB", (50, 50), "red").save(tmp_path / name)
+
+    if len(list(tmp_path.iterdir())) != 3:
+        pytest.skip("El sistema de archivos normaliza Unicode")
 
     monkeypatch.setattr(batch, "process_image", fake_process)
 

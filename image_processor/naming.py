@@ -1,29 +1,40 @@
 """
 Política de nombres de los resultados.
 
-1. Un original cuyo nombre base no comparte con otro conserva el
-   nombre histórico: TRANSFORMADA_producto.png.
-2. Si varios originales comparten nombre base, cada uno agrega
+Un nombre se compone de bloques, siempre en este orden:
+
+    TRANSFORMADA_<nombre base>[__esc][__src-<ext>][__<ancho>x<alto>_<fondo>].png
+
+1. "__" es un separador reservado. Un nombre base que no lo
+   contiene se usa literal, así que los nombres ordinarios
+   conservan su resultado histórico: TRANSFORMADA_producto.png.
+2. Un nombre base que contiene "__" se codifica ("%" -> "%25",
+   "_" -> "%5F") y se marca con __esc. Así ningún nombre de
+   fotografía puede imitar los bloques del sistema y cada
+   combinación de original y variante tiene un nombre propio.
+3. Si varios originales comparten nombre base, cada uno agrega
    la extensión de origen: TRANSFORMADA_producto__src-jpg.png.
    El nombre base también se considera compartido si el destino
-   ya contiene resultados __src- de ese nombre que ningún original
-   actual reclama, para no atribuir un resultado antiguo a otro
-   original.
-3. Las variantes no predeterminadas agregan al final sus
-   dimensiones y su fondo:
-   TRANSFORMADA_producto__src-jpg__800x600_transparent.png.
-4. Si aun así varios originales reclaman el mismo nombre, ninguno
-   de ellos se procesa y cada uno se informa como error.
+   contiene resultados __src- de ese nombre en cualquier variante,
+   para no atribuir un resultado antiguo a otro original.
+4. Las variantes no predeterminadas agregan al final sus
+   dimensiones y su fondo.
+5. Si varios originales reclaman el mismo nombre, ninguno se
+   procesa y cada uno se informa como error.
+6. Un resultado existente que una versión anterior pudo generar
+   para otro original actual (antes de codificar "__") no se
+   atribuye a nadie: se informa como error.
 
 Los nombres se comparan sin distinguir mayúsculas y en forma
 Unicode NFC, de modo conservador respecto de Windows.
 """
 
+import re
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .processing import OutputOptions
+from .processing import BACKGROUNDS, OutputOptions
 
 
 OUTPUT_PREFIX = "TRANSFORMADA_"
@@ -33,6 +44,22 @@ SUPPORTED_EXTENSIONS = {
 }
 
 SOURCE_TAGS = sorted(ext[1:] for ext in SUPPORTED_EXTENSIONS)
+
+SEPARATOR = "__"
+ESCAPE_MARKER = "__esc"
+
+_TAGS = "|".join(SOURCE_TAGS)
+_BACKGROUNDS = "|".join(BACKGROUNDS)
+
+# Bloques que siguen al nombre base, en minúsculas (name_key).
+_SOURCE_AND_VARIANT = re.compile(
+    rf"(?:{_TAGS})(?:__\d+x\d+_(?:{_BACKGROUNDS}))?\.png"
+)
+
+# Lo que una versión anterior agregaba al nombre base literal.
+_LEGACY_VARIANT = re.compile(
+    rf"(?:__(?P<width>\d+)x(?P<height>\d+)_(?P<background>{_BACKGROUNDS}))?\.png"
+)
 
 
 @dataclass(frozen=True)
@@ -67,6 +94,27 @@ def source_tag(path: Path) -> str:
     return path.suffix[1:].lower()
 
 
+def is_ordinary_stem(stem: str) -> bool:
+    """Un nombre base sin el separador reservado se usa literal."""
+
+    return SEPARATOR not in stem
+
+
+def encode_stem(stem: str) -> str:
+    """
+    Nombre base tal como aparece en el resultado.
+
+    Los nombres ordinarios no cambian. Los que contienen "__"
+    se codifican sin "_" y se marcan con __esc.
+    """
+    if is_ordinary_stem(stem):
+        return stem
+
+    encoded = stem.replace("%", "%25").replace("_", "%5F")
+
+    return f"{encoded}{ESCAPE_MARKER}"
+
+
 def output_name(
     stem: str,
     options: OutputOptions,
@@ -79,8 +127,9 @@ def output_name(
         TRANSFORMADA_producto__src-jpg.png
         TRANSFORMADA_producto__800x600_transparent.png
         TRANSFORMADA_producto__src-jpg__800x600_transparent.png
+        TRANSFORMADA_producto%5F%5Fsrc-jpg__esc.png
     """
-    name = f"{OUTPUT_PREFIX}{stem}"
+    name = f"{OUTPUT_PREFIX}{encode_stem(stem)}"
 
     if source_tag is not None:
         name += f"__src-{source_tag}"
@@ -94,17 +143,114 @@ def output_name(
     return f"{name}.png"
 
 
+def _has_source_suffix_results(stem: str, existing: set[str]) -> bool:
+    """¿Hay resultados __src- de este nombre base, en cualquier variante?"""
+
+    prefix = name_key(f"{OUTPUT_PREFIX}{encode_stem(stem)}__src-")
+
+    return any(
+        key.startswith(prefix)
+        and _SOURCE_AND_VARIANT.fullmatch(key[len(prefix):])
+        for key in existing
+    )
+
+
+def expected_format(options: OutputOptions) -> tuple[tuple[int, int], str]:
+    """Tamaño y modo exactos del PNG de una variante."""
+
+    mode = "RGBA" if options.background == "transparent" else "RGB"
+
+    return (options.width, options.height), mode
+
+
+def _legacy_variant(name: str, stem: str) -> OutputOptions | None:
+    """
+    Variante con la que una versión anterior, que usaba el nombre
+    base literal, habría guardado este nombre para stem.
+    """
+    key = name_key(name)
+    prefix = name_key(f"{OUTPUT_PREFIX}{stem}")
+
+    if not key.startswith(prefix):
+        return None
+
+    match = _LEGACY_VARIANT.fullmatch(key[len(prefix):])
+
+    if match is None:
+        return None
+
+    if match["width"] is None:
+        return OutputOptions()
+
+    try:
+        return OutputOptions(
+            int(match["width"]),
+            int(match["height"]),
+            match["background"],
+        )
+    except ValueError:
+        return None
+
+
+def _legacy_owners(
+    name: str,
+    source_index: int,
+    candidates: list[tuple[Path, str]],
+    options: OutputOptions,
+    existing: set[str],
+    describe_existing,
+) -> list[str]:
+    """
+    Originales actuales a los que una versión anterior, sin
+    codificar "__", pudo haber guardado este resultado existente.
+    """
+    owners = []
+
+    for index, (other, other_name) in enumerate(candidates):
+        if index == source_index or is_ordinary_stem(other.stem):
+            continue
+
+        legacy = _legacy_variant(name, other.stem)
+
+        if legacy is None:
+            continue
+
+        if legacy == options:
+            # Misma variante: si el otro original ya tiene su
+            # resultado con el nombre actual, este no es suyo.
+            if name_key(other_name) in existing:
+                continue
+        else:
+            # Variante distinta: el formato del archivo indica
+            # cuál de las dos lo generó.
+            found = (
+                describe_existing(name)
+                if describe_existing is not None
+                else None
+            )
+
+            if found == expected_format(options):
+                continue
+
+        owners.append(other.name)
+
+    return owners
+
+
 def plan_outputs(
     sources: list[Path],
     output_dir: Path,
     options: OutputOptions,
     existing_names: list[str] = (),
+    describe_existing=None,
 ) -> OutputPlan:
     """
     Asigna un destino independiente a cada original.
 
     El resultado no depende del orden de sources. Solo usa los
-    nombres recibidos: no lee ni escribe en el disco.
+    nombres recibidos y, si se indica, describe_existing(nombre),
+    que devuelve el (tamaño, modo) de un resultado existente o
+    None. No escribe en el disco.
     """
     output_dir = Path(output_dir)
     existing = {name_key(name) for name in existing_names}
@@ -118,39 +264,14 @@ def plan_outputs(
     for source in ordered:
         groups.setdefault(name_key(source.stem), []).append(source)
 
-    # Primera pasada: solo el tamaño de cada grupo.
+    # Un nombre base es compartido si hay varios originales, o si
+    # el destino ya tiene resultados __src- suyos en alguna variante.
     shared = {
-        key for key, group in groups.items() if len(group) > 1
+        key
+        for key, group in groups.items()
+        if len(group) > 1
+        or _has_source_suffix_results(group[0].stem, existing)
     }
-
-    claimed = {
-        name_key(
-            output_name(
-                source.stem,
-                options,
-                source_tag(source)
-                if name_key(source.stem) in shared
-                else None,
-            )
-        )
-        for source in ordered
-    }
-
-    # Segunda pasada: resultados __src- previos que ningún
-    # original actual reclama indican un nombre base ambiguo.
-    for key, group in groups.items():
-        stem = group[0].stem
-
-        evidence = [
-            name_key(output_name(stem, options, tag))
-            for tag in SOURCE_TAGS
-        ]
-
-        if any(
-            item in existing and item not in claimed
-            for item in evidence
-        ):
-            shared.add(key)
 
     plan = OutputPlan()
     candidates = []
@@ -211,12 +332,42 @@ def plan_outputs(
                     ),
                 )
             )
-        else:
+            continue
+
+        owners = (
+            _legacy_owners(
+                name,
+                index,
+                candidates,
+                options,
+                existing,
+                describe_existing,
+            )
+            if name_key(name) in existing
+            else []
+        )
+
+        if owners:
             plan.entries.append(
                 PlannedOutput(
                     source=source,
-                    output_path=output_dir / name,
+                    output_path=None,
+                    error=(
+                        f"el resultado existente {name} pudo haberlo "
+                        f"generado una versión anterior para "
+                        f"{', '.join(owners)}. No se atribuye ni se "
+                        "sobrescribe: muévalo o renómbrelo para "
+                        "volver a procesar."
+                    ),
                 )
             )
+            continue
+
+        plan.entries.append(
+            PlannedOutput(
+                source=source,
+                output_path=output_dir / name,
+            )
+        )
 
     return plan

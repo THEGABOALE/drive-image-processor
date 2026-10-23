@@ -33,16 +33,30 @@ Todos los destinos del lote se planifican antes de procesar, en
 un orden estable (alfabético, sin distinguir mayúsculas) que no
 depende del orden en que el sistema de archivos lista la carpeta.
 
+Un nombre se compone de bloques, siempre en este orden:
+
+```
+TRANSFORMADA_<nombre base>[__esc][__src-<extensión>][__<ancho>x<alto>_<fondo>].png
+```
+
 | Situación | Ejemplo de resultado |
 |---|---|
 | Original único, variante predeterminada | `TRANSFORMADA_producto.png` |
 | Original único, otra variante | `TRANSFORMADA_producto__800x600_transparent.png` |
 | Varios originales con el mismo nombre base | `TRANSFORMADA_producto__src-jpg.png` |
 | Varios originales, otra variante | `TRANSFORMADA_producto__src-jpg__800x600_transparent.png` |
+| Nombre de original que contiene `__` | `TRANSFORMADA_producto%5F%5F800x600%5Ftransparent__esc.png` |
 
-- **Nombre histórico:** un original que no comparte nombre base con
-  otro conserva `TRANSFORMADA_<nombre>.png`, así que los resultados
-  previos se siguen reconociendo.
+- **Separador reservado `__`:** los bloques del sistema empiezan con
+  `__`. Un nombre base ordinario (sin `__`) se usa literal y conserva
+  `TRANSFORMADA_<nombre>.png`, así que los resultados previos se siguen
+  reconociendo.
+- **Codificación:** si el nombre base contiene `__`, se codifica
+  (`%` como `%25` y `_` como `%5F`) y se marca con `__esc`. Así un
+  original llamado `producto__800x600_transparent.jpg` o
+  `producto__src-jpg.png` nunca puede tomar el nombre de una variante
+  o de otro original: cada combinación de original y variante tiene un
+  nombre propio, también entre ejecuciones sucesivas.
 - **Sufijo `__src-<extensión>`:** se agrega cuando dos o más
   originales comparten nombre base (`producto.jpg`, `producto.png`,
   `producto.webp`). Usa la extensión en minúsculas (`jpg`, `jpeg`,
@@ -60,12 +74,21 @@ depende del orden en que el sistema de archivos lista la carpeta.
   no se atribuye a ninguno. Se conserva intacto, cada original
   genera su resultado `__src-` y el lote muestra una advertencia.
   Lo mismo ocurre si después queda un solo original, pero el destino
-  todavía tiene resultados `__src-` de ese nombre base.
+  todavía tiene resultados `__src-` de ese nombre base en cualquier
+  variante.
+- **Resultados de versiones anteriores:** antes de esta política, un
+  original con `__` en el nombre se guardaba con el nombre literal, que
+  hoy puede coincidir con el de otro original. Si un resultado
+  existente pudo pertenecer a otro original actual, no se atribuye ni
+  se sobrescribe: la imagen se informa como fallida y se indica que se
+  mueva o renombre ese resultado. Cuando la variante del resultado
+  heredado difiere de la pedida, el tamaño y el modo del PNG existente
+  bastan para decidir.
 - **Colisiones sin solución segura:** si dos originales reclaman el
-  mismo nombre (por ejemplo, `producto.jpg` junto a otro original
-  llamado `producto__src-jpg.png`), ninguno de los dos se procesa y
-  cada uno se informa como fallido, con la indicación de renombrar.
-  Las demás imágenes del lote se procesan normalmente.
+  mismo nombre (por ejemplo, `café.jpg` escrito en formas Unicode NFC
+  y NFD, que NTFS admite juntas), ninguno de los dos se procesa y cada
+  uno se informa como fallido, con la indicación de renombrar. Las
+  demás imágenes del lote se procesan normalmente.
 
 Limitaciones hasta que exista un manifiesto (H-05):
 
@@ -75,6 +98,12 @@ Limitaciones hasta que exista un manifiesto (H-05):
   los resultados existentes de la misma variante.
 - Agregar un segundo original con el mismo nombre base hace que el
   primero se vuelva a procesar con el sufijo `__src-`.
+- Un resultado heredado de un original con `__` cuyo original ya no
+  está en la carpeta no puede reconocerse como ajeno.
+- Si el resultado heredado es de la misma variante, solo se detecta
+  mientras el otro original todavía no tenga su resultado con el
+  nombre actual (normalmente, en la primera ejecución con esta
+  versión).
 
 ## Estado
 

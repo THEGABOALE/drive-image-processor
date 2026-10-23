@@ -38,6 +38,16 @@ def _discover_sources(input_dir: Path) -> list[Path]:
     ]
 
 
+def _describe_output(path: Path):
+    """(tamaño, modo) de un resultado existente, o None si no se lee."""
+
+    try:
+        with Image.open(path) as image:
+            return image.size, image.mode
+    except Exception:
+        return None
+
+
 def process_folder(
     input_dir: Path,
     output_dir: Path | None = None,
@@ -94,6 +104,7 @@ def process_folder(
         output_dir,
         options,
         existing_names,
+        describe_existing=lambda name: _describe_output(output_dir / name),
     )
 
     summary.warnings.extend(plan.warnings)
