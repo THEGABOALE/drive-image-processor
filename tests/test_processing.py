@@ -234,6 +234,56 @@ def test_transparent_background_preserves_edge_alpha():
     assert white.getpixel((20, 200)) == (127, 127, 255)
 
 
+@pytest.mark.parametrize(
+    "side, band",
+    [
+        # Reducción: 1120 px a 560 px (escala 0,5).
+        (1120, 80),
+        # Ampliación: 280 px a 560 px (escala 2).
+        (280, 20),
+    ],
+)
+def test_resized_product_preserves_semitransparent_edges(side, band):
+    # Producto azul opaco con un borde de alfa 128.
+    image = Image.new("RGBA", (side, side), (0, 0, 255, 128))
+    image.paste(
+        (0, 0, 255, 255), (band, band, side - band, side - band)
+    )
+
+    options = OutputOptions(800, 600, "transparent")
+    result = normalize_image(image, options=options)
+
+    assert result.mode == "RGBA"
+    assert result.size == (800, 600)
+
+    # Escala 560 / side: el producto ocupa x 120..680, y 20..580,
+    # y el borde, 40 px. Se miden los centros de los bordes,
+    # lejos de las transiciones del filtro.
+    assert result.getchannel("A").getbbox() == (120, 20, 680, 580)
+
+    for point in [(140, 300), (660, 300), (400, 40), (400, 560)]:
+        red, green, blue, alpha = result.getpixel(point)
+
+        assert abs(alpha - 128) <= 1
+        # Sin halo oscuro: el borde conserva el color del producto.
+        assert (red, green) == (0, 0)
+        assert blue >= 254
+
+    assert result.getpixel((400, 300)) == (0, 0, 255, 255)
+    assert result.getpixel((119, 300))[3] == 0
+    assert result.getpixel((680, 300))[3] == 0
+
+    # El mismo borde sobre blanco se mezcla al 50 %.
+    white = normalize_image(
+        image, options=OutputOptions(800, 600, "white")
+    )
+    red, green, blue = white.getpixel((140, 300))
+
+    assert abs(red - 127) <= 1
+    assert abs(green - 127) <= 1
+    assert blue == 255
+
+
 @pytest.mark.parametrize("background", ["white", "transparent"])
 @pytest.mark.parametrize(
     "source_size, canvas, expected_box",
