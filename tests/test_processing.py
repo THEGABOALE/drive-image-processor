@@ -1,7 +1,7 @@
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 
-from image_processor.processing import normalize_image
+from image_processor.processing import OutputOptions, normalize_image
 
 
 def test_output_dimensions():
@@ -151,3 +151,184 @@ def test_invalid_alpha_threshold(threshold):
             image,
             alpha_threshold=threshold,
         )
+
+
+def content_box(result):
+    """Caja de los píxeles que no son fondo."""
+
+    if result.mode == "RGBA":
+        return result.getchannel("A").getbbox()
+
+    background = Image.new("RGB", result.size, "white")
+
+    return ImageChops.difference(result, background).getbbox()
+
+
+def translucent_product():
+    image = Image.new("RGBA", (300, 200), (0, 0, 0, 0))
+    image.paste((255, 0, 0, 200), (40, 30, 260, 170))
+    image.paste((255, 0, 0, 255), (60, 50, 240, 150))
+    return image
+
+
+def test_default_options_match_previous_defaults():
+    image = translucent_product()
+
+    default = normalize_image(image)
+    explicit = normalize_image(
+        image,
+        options=OutputOptions(
+            width=400, height=400, background="white"
+        ),
+    )
+
+    assert OutputOptions() == OutputOptions(400, 400, "white")
+    assert default.mode == "RGB"
+    assert default.size == (400, 400)
+    assert default.tobytes() == explicit.tobytes()
+
+
+def test_white_background_option_is_rgb():
+    result = normalize_image(
+        translucent_product(),
+        options=OutputOptions(background="white"),
+    )
+
+    assert result.mode == "RGB"
+    assert result.getpixel((0, 0)) == (255, 255, 255)
+    assert result.getpixel((399, 399)) == (255, 255, 255)
+    assert result.getpixel((200, 200)) == (255, 0, 0)
+
+
+def test_transparent_background_option_is_rgba():
+    result = normalize_image(
+        translucent_product(),
+        options=OutputOptions(background="transparent"),
+    )
+
+    assert result.mode == "RGBA"
+    assert result.getpixel((0, 0))[3] == 0
+    assert result.getpixel((399, 399))[3] == 0
+    assert result.getpixel((200, 200)) == (255, 0, 0, 255)
+
+
+def test_transparent_background_preserves_edge_alpha():
+    # Exactamente 360 x 360: escala 1, sin remuestreo.
+    image = Image.new("RGBA", (360, 360), (0, 0, 255, 128))
+    image.paste((0, 0, 255, 255), (10, 10, 350, 350))
+
+    transparent = normalize_image(
+        image,
+        options=OutputOptions(background="transparent"),
+    )
+
+    product = transparent.crop((20, 20, 380, 380))
+
+    assert product.tobytes() == image.tobytes()
+    assert transparent.getpixel((20, 200)) == (0, 0, 255, 128)
+    assert transparent.getpixel((19, 200))[3] == 0
+
+    # Con fondo blanco, el mismo borde se mezcla con el blanco.
+    white = normalize_image(image)
+
+    assert white.getpixel((20, 200)) == (127, 127, 255)
+
+
+@pytest.mark.parametrize("background", ["white", "transparent"])
+@pytest.mark.parametrize(
+    "source_size, canvas, expected_box",
+    [
+        # 200 x 100 escala 3,8 -> 760 x 380.
+        ((200, 100), (800, 600), (20, 110, 780, 490)),
+        # 100 x 300 escala 1,2 -> 120 x 360.
+        ((100, 300), (800, 400), (340, 20, 460, 380)),
+        # 300 x 300 escala 560/300 -> 560 x 560.
+        ((300, 300), (600, 900), (20, 170, 580, 730)),
+    ],
+)
+def test_rectangular_canvas_preserves_aspect_and_centers(
+    background, source_size, canvas, expected_box
+):
+    image = Image.new("RGB", source_size, "blue")
+
+    result = normalize_image(
+        image,
+        options=OutputOptions(
+            width=canvas[0],
+            height=canvas[1],
+            background=background,
+        ),
+    )
+
+    assert result.size == canvas
+
+    box = content_box(result)
+    assert box == expected_box
+
+    left, top, right, bottom = box
+    assert (right - left) / (bottom - top) == pytest.approx(
+        source_size[0] / source_size[1]
+    )
+
+    # Centrado: márgenes opuestos iguales (±1 px por redondeo).
+    assert abs(left - (canvas[0] - right)) <= 1
+    assert abs(top - (canvas[1] - bottom)) <= 1
+
+
+def test_fully_transparent_image_with_transparent_background():
+    image = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+
+    result = normalize_image(
+        image,
+        options=OutputOptions(
+            width=500, height=300, background="transparent"
+        ),
+    )
+
+    assert result.mode == "RGBA"
+    assert result.size == (500, 300)
+    assert result.getchannel("A").getbbox() is None
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"width": 0},
+        {"height": -1},
+        {"width": 63},
+        {"height": 6001},
+        {"width": 5000, "height": 5000},
+        {"width": 400.0},
+        {"height": "400"},
+        {"width": True},
+        {"background": "azul"},
+        {"background": "WHITE"},
+    ],
+)
+def test_invalid_output_options(arguments):
+    with pytest.raises(ValueError):
+        OutputOptions(**arguments)
+
+
+def test_largest_allowed_canvas_is_accepted():
+    options = OutputOptions(width=6000, height=2666)
+
+    assert options.width * options.height <= 16_000_000
+
+
+def test_margin_is_validated_against_smaller_side():
+    image = Image.new("RGB", (100, 100), "red")
+
+    with pytest.raises(ValueError, match="margen"):
+        normalize_image(
+            image,
+            options=OutputOptions(width=800, height=64),
+            margin=32,
+        )
+
+
+def test_options_must_be_output_options():
+    image = Image.new("RGB", (100, 100), "red")
+
+    with pytest.raises(TypeError):
+        normalize_image(image, 400)

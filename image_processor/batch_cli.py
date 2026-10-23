@@ -7,6 +7,15 @@ from .background_removal import (
     ModelInitializationError,
 )
 from .batch import process_folder
+from .processing import (
+    BACKGROUNDS,
+    DEFAULT_BACKGROUND,
+    DEFAULT_HEIGHT,
+    DEFAULT_WIDTH,
+    MAX_SIDE,
+    MIN_SIDE,
+    OutputOptions,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,15 +44,57 @@ def main(argv: list[str] | None = None) -> int:
         help="Modelo de eliminación de fondo",
     )
 
+    parser.add_argument(
+        "--background",
+        choices=BACKGROUNDS,
+        default=DEFAULT_BACKGROUND,
+        help=f"Fondo del resultado (por defecto, {DEFAULT_BACKGROUND})",
+    )
+
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=DEFAULT_WIDTH,
+        help=(
+            f"Ancho en píxeles, entre {MIN_SIDE} y {MAX_SIDE} "
+            f"(por defecto, {DEFAULT_WIDTH})"
+        ),
+    )
+
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=DEFAULT_HEIGHT,
+        help=(
+            f"Alto en píxeles, entre {MIN_SIDE} y {MAX_SIDE} "
+            f"(por defecto, {DEFAULT_HEIGHT})"
+        ),
+    )
+
     args = parser.parse_args(argv)
 
+    try:
+        options = OutputOptions(
+            width=args.width,
+            height=args.height,
+            background=args.background,
+        )
+    except ValueError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+
     print("\nIniciando procesamiento de imágenes...")
+    print(
+        f"Resultado: {options.width} x {options.height} px, "
+        f"fondo {options.background}"
+    )
 
     try:
         result = process_folder(
             input_dir=args.input,
             output_dir=args.output,
             model_name=args.model,
+            options=options,
         )
     except ModelInitializationError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)

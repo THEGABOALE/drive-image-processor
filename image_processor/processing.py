@@ -1,26 +1,97 @@
+from dataclasses import dataclass
+
 from PIL import Image, ImageOps
+
+
+BACKGROUND_COLORS = {
+    "white": (255, 255, 255, 255),
+    "transparent": (0, 0, 0, 0),
+}
+
+BACKGROUNDS = tuple(BACKGROUND_COLORS)
+
+DEFAULT_WIDTH = 400
+DEFAULT_HEIGHT = 400
+DEFAULT_BACKGROUND = "white"
+
+# Límites del lienzo final. Un lienzo RGBA de 16 MP
+# ocupa unos 64 MB, sin contar las copias intermedias.
+MIN_SIDE = 64
+MAX_SIDE = 6000
+MAX_PIXELS = 16_000_000
+
+
+@dataclass(frozen=True)
+class OutputOptions:
+    """Dimensiones y fondo del resultado final."""
+
+    width: int = DEFAULT_WIDTH
+    height: int = DEFAULT_HEIGHT
+    background: str = DEFAULT_BACKGROUND
+
+    def __post_init__(self):
+        for label, value in (
+            ("ancho", self.width),
+            ("alto", self.height),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(
+                    f"El {label} debe ser un número entero."
+                )
+
+            if not MIN_SIDE <= value <= MAX_SIDE:
+                raise ValueError(
+                    f"El {label} debe estar entre "
+                    f"{MIN_SIDE} y {MAX_SIDE} píxeles."
+                )
+
+        if self.width * self.height > MAX_PIXELS:
+            raise ValueError(
+                "La imagen final no puede superar "
+                f"{MAX_PIXELS:,} píxeles."
+            )
+
+        if self.background not in BACKGROUNDS:
+            raise ValueError(
+                f"Fondo no válido: {self.background}. "
+                f"Opciones: {', '.join(BACKGROUNDS)}."
+            )
+
+
+def _finish(canvas: Image.Image, options: OutputOptions) -> Image.Image:
+    # Fondo blanco: RGB sin alfa. Transparente: RGBA.
+    if options.background == "white":
+        return canvas.convert("RGB")
+
+    return canvas
 
 
 def normalize_image(
         image: Image.Image,
-        canvas_size: int = 400,
+        options: OutputOptions | None = None,
         margin: int = 20,
         alpha_threshold: int = 16,
         crop_padding: int = 3,
 ) -> Image.Image:
     """
-    Centra una imagen sobre un fondo blanco.
-    
+    Centra una imagen sobre un lienzo blanco o transparente.
+
     Utiliza un umbral alfa para ignorar residuos casi transparentes al calcular el recorte.
-    
-    Cambia las proporciones y devuelve RGB.
+
+    Conserva las proporciones del objeto. Devuelve RGB con fondo
+    blanco o RGBA con fondo transparente.
     """
-    if canvas_size <=0:
-        raise ValueError(
-            "El tamaño del lienzo debe ser positivo."
+    if options is None:
+        options = OutputOptions()
+
+    if not isinstance(options, OutputOptions):
+        raise TypeError(
+            "options debe ser una instancia de OutputOptions."
         )
 
-    if margin < 0 or margin * 2 >= canvas_size:
+    width, height = options.width, options.height
+
+    if margin < 0 or margin * 2 >= min(width, height):
         raise ValueError("El margen no es válido.")
 
     if not 0 <= alpha_threshold < 255:
@@ -64,11 +135,12 @@ def normalize_image(
             bbox = alpha.getbbox()
 
         if bbox is None:
-            return Image.new(
-                "RGB",
-                (canvas_size, canvas_size),
-                "white",
+            blank = Image.new(
+                "RGBA",
+                (width, height),
+                BACKGROUND_COLORS[options.background],
             )
+            return _finish(blank, options)
 
         left, top, right, bottom = bbox
 
@@ -82,12 +154,12 @@ def normalize_image(
             (left, top, right, bottom)
         )
 
-    available_size = canvas_size - (margin * 2)
-
+    available_width = width - (margin * 2)
+    available_height = height - (margin * 2)
 
     scale = min(
-        available_size / source.width,
-        available_size / source.height
+        available_width / source.width,
+        available_height / source.height
     )
 
     new_width = max(
@@ -104,13 +176,15 @@ def normalize_image(
 
     canvas = Image.new(
         "RGBA",
-        (canvas_size, canvas_size),
-        (255, 255, 255, 255),
+        (width, height),
+        BACKGROUND_COLORS[options.background],
     )
 
-    x = (canvas_size - new_width) // 2
-    y = (canvas_size - new_height) // 2
+    x = (width - new_width) // 2
+    y = (height - new_height) // 2
 
+    # Sobre un lienzo transparente, alpha_composite
+    # conserva el alfa de la segmentación sin cambios.
     canvas.alpha_composite(resized, (x, y))
 
-    return canvas.convert("RGB")
+    return _finish(canvas, options)

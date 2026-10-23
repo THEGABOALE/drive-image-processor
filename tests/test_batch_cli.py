@@ -5,7 +5,7 @@ from PIL import Image
 from image_processor import background_removal, batch, batch_cli
 
 
-def fake_process(image, model_name):
+def fake_process(image, model_name, options=None):
     return Image.new("RGB", (400, 400), "white")
 
 
@@ -100,3 +100,103 @@ def test_cli_reports_model_initialization_failure(
         "producto.jpg"
     ]
     assert original.read_bytes() == original_bytes
+
+
+def options_aware_process(image, model_name, options=None):
+    if options.background == "transparent":
+        return Image.new(
+            "RGBA", (options.width, options.height), (255, 0, 0, 128)
+        )
+
+    return Image.new("RGB", (options.width, options.height), "white")
+
+
+def test_cli_custom_background_and_dimensions(
+    tmp_path, monkeypatch, capsys
+):
+    input_dir = tmp_path / "inputs"
+    output_dir = tmp_path / "outputs"
+    input_dir.mkdir()
+
+    original = input_dir / "producto.jpg"
+    Image.new("RGB", (800, 600), "red").save(original)
+    original_bytes = original.read_bytes()
+
+    monkeypatch.setattr(batch, "process_image", options_aware_process)
+
+    exit_code = batch_cli.main([
+        "--input", str(input_dir),
+        "--output", str(output_dir),
+        "--background", "transparent",
+        "--width", "800",
+        "--height", "600",
+    ])
+
+    assert exit_code == 0
+    assert "800 x 600 px, fondo transparent" in capsys.readouterr().out
+
+    output = output_dir / "TRANSFORMADA_producto__800x600_transparent.png"
+
+    with Image.open(output) as image:
+        image.load()
+        assert image.mode == "RGBA"
+        assert image.size == (800, 600)
+
+    # Sin parámetros nuevos: variante predeterminada, sin colisión.
+    exit_code = batch_cli.main([
+        "--input", str(input_dir),
+        "--output", str(output_dir),
+    ])
+
+    assert exit_code == 0
+
+    with Image.open(output_dir / "TRANSFORMADA_producto.png") as image:
+        assert image.mode == "RGB"
+        assert image.size == (400, 400)
+
+    assert original.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--width", "0"],
+        ["--height", "-5"],
+        ["--width", "6001"],
+        ["--width", "5000", "--height", "5000"],
+    ],
+)
+def test_cli_rejects_invalid_dimensions(
+    tmp_path, monkeypatch, capsys, arguments
+):
+    Image.new("RGB", (50, 50), "red").save(tmp_path / "producto.jpg")
+
+    calls = []
+    monkeypatch.setattr(batch, "prepare_model", calls.append)
+
+    output_dir = tmp_path / "outputs"
+
+    exit_code = batch_cli.main([
+        "--input", str(tmp_path),
+        "--output", str(output_dir),
+        *arguments,
+    ])
+
+    assert exit_code == 2
+    assert "[ERROR]" in capsys.readouterr().err
+    assert calls == []
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--background", "azul"],
+        ["--width", "ancho"],
+    ],
+)
+def test_cli_rejects_invalid_argument_values(tmp_path, arguments):
+    with pytest.raises(SystemExit) as error:
+        batch_cli.main(["--input", str(tmp_path), *arguments])
+
+    assert error.value.code == 2

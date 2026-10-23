@@ -7,11 +7,36 @@ from PIL import Image
 from .atomic_write import remove_stale_temp_files, save_png_exclusive
 from .background_removal import prepare_model
 from .pipeline import process_image
+from .processing import OutputOptions
 
 
 SUPPORTED_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".webp"
 }
+
+
+def output_name(stem: str, options: OutputOptions) -> str:
+    """
+    Nombre del resultado de una imagen.
+
+    La variante predeterminada (400 x 400, fondo blanco) conserva
+    el nombre histórico, para que sus resultados previos se sigan
+    reconociendo:
+
+        TRANSFORMADA_producto.png
+
+    Cualquier otra variante agrega sus dimensiones y su fondo, así
+    que nunca omite ni sobrescribe el resultado de otra variante:
+
+        TRANSFORMADA_producto__800x600_transparent.png
+    """
+    if options == OutputOptions():
+        return f"TRANSFORMADA_{stem}.png"
+
+    return (
+        f"TRANSFORMADA_{stem}__"
+        f"{options.width}x{options.height}_{options.background}.png"
+    )
 
 
 @dataclass
@@ -27,9 +52,13 @@ def process_folder(
     input_dir: Path,
     output_dir: Path | None = None,
     model_name: str = "isnet-general-use",
+    options: OutputOptions | None = None,
 ) -> BatchResult:
     """
     Procesa las imágenes de una carpeta.
+
+    options define dimensiones y fondo (por defecto, 400 x 400
+    blanco). Los nombres siguen la política de output_name().
 
     Origen y destino pueden ser la misma carpeta.
     No se admiten lotes concurrentes sobre el mismo destino.
@@ -38,6 +67,9 @@ def process_folder(
     imágenes pendientes. Si falla, se lanza
     ModelInitializationError antes de procesar fotografías.
     """
+
+    if options is None:
+        options = OutputOptions()
 
     input_dir = Path(input_dir)
 
@@ -75,7 +107,7 @@ def process_folder(
             continue
 
         output_path = (
-            output_dir / f"TRANSFORMADA_{file.stem}.png"
+            output_dir / output_name(file.stem, options)
         )
 
         # Evita colisiones de nombres en el mismo lote.
@@ -106,6 +138,7 @@ def process_folder(
                 result = process_image(
                     image,
                     model_name=model_name,
+                    options=options,
                 )
 
             # Publicación atómica: nunca sobrescribe

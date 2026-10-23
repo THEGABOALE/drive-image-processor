@@ -8,13 +8,14 @@ from PIL import Image
 
 from image_processor import background_removal, batch, pipeline
 from image_processor.background_removal import ModelInitializationError
+from image_processor.processing import OutputOptions
 
 
 @pytest.fixture(autouse=True)
 def mock_ai(monkeypatch):
     """Evita ejecutar o descargar modelos durante las pruebas."""
 
-    def fake_process(image, model_name):
+    def fake_process(image, model_name, options=None):
         return Image.new("RGB", (400, 400), "white")
 
     monkeypatch.setattr(
@@ -116,7 +117,7 @@ def test_batch_interrupted_save_leaves_no_output(tmp_path, monkeypatch):
     monkeypatch.setattr(
         batch,
         "process_image",
-        lambda image, model_name: FailingResult(KeyboardInterrupt()),
+        lambda image, model_name, options=None: FailingResult(KeyboardInterrupt()),
     )
 
     with pytest.raises(KeyboardInterrupt):
@@ -130,7 +131,7 @@ def test_batch_interrupted_save_leaves_no_output(tmp_path, monkeypatch):
     monkeypatch.setattr(
         batch,
         "process_image",
-        lambda image, model_name: Image.new("RGB", (400, 400), "white"),
+        lambda image, model_name, options=None: Image.new("RGB", (400, 400), "white"),
     )
 
     result = batch.process_folder(tmp_path)
@@ -188,7 +189,7 @@ def test_batch_continues_after_disk_full(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_process(image, model_name):
+    def fake_process(image, model_name, options=None):
         calls.append(image)
         if len(calls) == 1:
             return FailingResult(
@@ -243,7 +244,7 @@ def test_model_failure_is_attempted_once_per_batch(
     monkeypatch.setattr(
         batch,
         "process_image",
-        lambda image, model_name: processed.append(image),
+        lambda image, model_name, options=None: processed.append(image),
     )
 
     with pytest.raises(
@@ -359,3 +360,192 @@ def test_initialized_session_is_reused_during_batch(
 
     for name in ("a", "b", "c"):
         assert_valid_png(tmp_path / f"TRANSFORMADA_{name}.png")
+
+
+def options_aware_process(image, model_name, options=None):
+    """Simula el pipeline respetando dimensiones y fondo."""
+
+    options = options or OutputOptions()
+
+    if options.background == "transparent":
+        return Image.new(
+            "RGBA", (options.width, options.height), (255, 0, 0, 128)
+        )
+
+    return Image.new("RGB", (options.width, options.height), "white")
+
+
+def test_output_name_policy():
+    assert (
+        batch.output_name("producto", OutputOptions())
+        == "TRANSFORMADA_producto.png"
+    )
+    assert (
+        batch.output_name("producto", OutputOptions(400, 400, "white"))
+        == "TRANSFORMADA_producto.png"
+    )
+    assert (
+        batch.output_name(
+            "producto", OutputOptions(800, 600, "transparent")
+        )
+        == "TRANSFORMADA_producto__800x600_transparent.png"
+    )
+    assert (
+        batch.output_name(
+            "producto", OutputOptions(400, 400, "transparent")
+        )
+        == "TRANSFORMADA_producto__400x400_transparent.png"
+    )
+    assert (
+        batch.output_name("producto", OutputOptions(600, 800, "white"))
+        == "TRANSFORMADA_producto__600x800_white.png"
+    )
+
+
+def test_batch_passes_default_options(tmp_path, monkeypatch):
+    make_images(tmp_path, ["producto.jpg"])
+
+    received = []
+
+    def spy_process(image, model_name, options=None):
+        received.append(options)
+        return Image.new("RGB", (400, 400), "white")
+
+    monkeypatch.setattr(batch, "process_image", spy_process)
+
+    batch.process_folder(tmp_path)
+
+    assert received == [OutputOptions()]
+    assert (tmp_path / "TRANSFORMADA_producto.png").exists()
+
+
+def test_batch_variants_do_not_collide_or_overwrite(
+    tmp_path, monkeypatch
+):
+    originals = make_images(tmp_path, ["producto.jpg"])
+
+    monkeypatch.setattr(batch, "process_image", options_aware_process)
+
+    variants = {
+        OutputOptions(): ("RGB", (400, 400)),
+        OutputOptions(800, 600, "transparent"): ("RGBA", (800, 600)),
+        OutputOptions(800, 600, "white"): ("RGB", (800, 600)),
+        OutputOptions(400, 400, "transparent"): ("RGBA", (400, 400)),
+    }
+
+    # Misma carpeta como origen y destino.
+    for options in variants:
+        result = batch.process_folder(tmp_path, options=options)
+
+        assert (result.processed, result.skipped, result.failed) == (
+            1, 0, 0,
+        )
+
+    outputs = {}
+
+    for options, (mode, size) in variants.items():
+        path = tmp_path / batch.output_name("producto", options)
+
+        with Image.open(path) as image:
+            image.load()
+            assert image.mode == mode
+            assert image.size == size
+
+        outputs[path] = path.read_bytes()
+
+    assert len(outputs) == 4
+
+    # Una segunda pasada omite cada variante sin sobrescribirla.
+    for options in variants:
+        result = batch.process_folder(tmp_path, options=options)
+
+        assert (result.processed, result.skipped) == (0, 1)
+
+    for path, content in outputs.items():
+        assert path.read_bytes() == content
+
+    for path, content in originals.items():
+        assert path.read_bytes() == content
+
+    assert len(list(tmp_path.iterdir())) == 5
+
+
+def test_batch_existing_variant_is_not_overwritten(
+    tmp_path, monkeypatch
+):
+    make_images(tmp_path, ["producto.jpg"])
+    monkeypatch.setattr(batch, "process_image", options_aware_process)
+
+    options = OutputOptions(800, 600, "transparent")
+    existing = tmp_path / batch.output_name("producto", options)
+    existing.write_bytes(b"PREVIO")
+
+    result = batch.process_folder(tmp_path, options=options)
+
+    assert (result.processed, result.skipped) == (0, 1)
+    assert existing.read_bytes() == b"PREVIO"
+
+    # La variante predeterminada es otro resultado.
+    result = batch.process_folder(tmp_path)
+
+    assert result.processed == 1
+    assert_valid_png(tmp_path / "TRANSFORMADA_producto.png")
+
+
+def test_transparent_variant_uses_atomic_write(
+    tmp_path, monkeypatch, real_model_init
+):
+    originals = make_images(tmp_path, ["producto.jpg"])
+
+    options = OutputOptions(800, 600, "transparent")
+    final_name = batch.output_name("producto", options)
+
+    stale = tmp_path / f"{final_name}.abc12_yz.tmp"
+    stale.write_bytes(b"parcial")
+    old = time.time() - 25 * 60 * 60
+    os.utime(stale, (old, old))
+
+    def fake_remove(image, session):
+        # Producto opaco con borde semitransparente.
+        cutout = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        cutout.paste((255, 0, 0, 128), (5, 5, 45, 45))
+        cutout.paste((255, 0, 0, 255), (10, 10, 40, 40))
+        return cutout
+
+    writes = []
+    real_save = batch.save_png_exclusive
+
+    def spy_save(image, path):
+        writes.append(path)
+        real_save(image, path)
+
+    monkeypatch.setattr(
+        background_removal, "new_session", lambda model_name: object()
+    )
+    monkeypatch.setattr(background_removal, "remove", fake_remove)
+    monkeypatch.setattr(batch, "process_image", pipeline.process_image)
+    monkeypatch.setattr(batch, "save_png_exclusive", spy_save)
+
+    result = batch.process_folder(tmp_path, options=options)
+
+    output = tmp_path / final_name
+
+    assert result.processed == 1
+    assert result.temp_removed == 1
+    assert writes == [output]
+    assert list(tmp_path.glob("*.tmp")) == []
+
+    with Image.open(output) as image:
+        image.load()
+        assert image.mode == "RGBA"
+        assert image.size == (800, 600)
+        assert image.getpixel((0, 0))[3] == 0
+
+        alphas = image.getchannel("A").histogram()
+
+    # Opaco en el centro y semitransparente en el borde.
+    assert alphas[255] > 0
+    assert any(alphas[1:255])
+
+    for path, content in originals.items():
+        assert path.read_bytes() == content
