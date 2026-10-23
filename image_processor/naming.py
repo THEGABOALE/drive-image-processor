@@ -3,7 +3,10 @@ Política de nombres de los resultados.
 
 Un nombre se compone de bloques, siempre en este orden:
 
-    TRANSFORMADA_<nombre base>[__esc][__src-<ext>][__<ancho>x<alto>_<fondo>].png
+    TRANSFORMADA_<nombre base>[__esc][__src-<ext>][__<ancho>x<alto>_<fondo>][__rev-<12 hex>].png
+
+El bloque __rev- lo agrega el manifiesto (ver manifest.py y
+batch.py) cuando el nombre base ya pertenece a otro resultado.
 
 1. "__" es un separador reservado. Un nombre base que no lo
    contiene se usa literal, así que los nombres ordinarios
@@ -51,9 +54,11 @@ ESCAPE_MARKER = "__esc"
 _TAGS = "|".join(SOURCE_TAGS)
 _BACKGROUNDS = "|".join(BACKGROUNDS)
 
+_REVISION = r"__rev-[0-9a-f]{12}"
+
 # Bloques que siguen al nombre base, en minúsculas (name_key).
 _SOURCE_AND_VARIANT = re.compile(
-    rf"(?:{_TAGS})(?:__\d+x\d+_(?:{_BACKGROUNDS}))?\.png"
+    rf"(?:{_TAGS})(?:__\d+x\d+_(?:{_BACKGROUNDS}))?(?:{_REVISION})?\.png"
 )
 
 # Lo que una versión anterior agregaba al nombre base literal.
@@ -141,6 +146,15 @@ def output_name(
         )
 
     return f"{name}.png"
+
+
+def with_revision(name: str, revision: str) -> str:
+    """Agrega el bloque __rev-<revisión> a un nombre de resultado."""
+
+    if not re.fullmatch(r"[0-9a-f]{12}", revision):
+        raise ValueError(f"Revisión inválida: {revision}")
+
+    return f"{name[:-len('.png')]}__rev-{revision}.png"
 
 
 def _has_source_suffix_results(stem: str, existing: set[str]) -> bool:
@@ -243,6 +257,7 @@ def plan_outputs(
     options: OutputOptions,
     existing_names: list[str] = (),
     describe_existing=None,
+    known_names: set[str] = frozenset(),
 ) -> OutputPlan:
     """
     Asigna un destino independiente a cada original.
@@ -251,9 +266,14 @@ def plan_outputs(
     nombres recibidos y, si se indica, describe_existing(nombre),
     que devuelve el (tamaño, modo) de un resultado existente o
     None. No escribe en el disco.
+
+    known_names son las claves (name_key) de los resultados que
+    registra el manifiesto: su procedencia ya se conoce, así que
+    no se evalúan como posibles resultados de una versión anterior.
     """
     output_dir = Path(output_dir)
     existing = {name_key(name) for name in existing_names}
+    known = set(known_names)
 
     ordered = sorted(
         sources, key=lambda path: (name_key(path.name), path.name)
@@ -343,7 +363,7 @@ def plan_outputs(
                 existing,
                 describe_existing,
             )
-            if name_key(name) in existing
+            if name_key(name) in existing and name_key(name) not in known
             else []
         )
 

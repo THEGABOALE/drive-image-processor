@@ -67,8 +67,9 @@ TRANSFORMADA_<nombre base>[__esc][__src-<extensión>][__<ancho>x<alto>_<fondo>].
 - **Comparación de nombres:** sin distinguir mayúsculas y en forma
   Unicode NFC, como en Windows. `Producto.jpg` y `producto.png`
   comparten nombre base.
-- **Resultados existentes:** si el destino de una imagen ya existe,
-  incluso con otras mayúsculas, se omite y nunca se sobrescribe.
+- **Resultados existentes:** un PNG existente nunca se sobrescribe.
+  Solo se omite si el manifiesto lo verifica (ver la sección
+  siguiente); la existencia del archivo no basta.
 - **Resultados históricos ambiguos:** si aparece un segundo original
   con el mismo nombre base, el histórico `TRANSFORMADA_producto.png`
   no se atribuye a ninguno. Se conserva intacto, cada original
@@ -90,20 +91,83 @@ TRANSFORMADA_<nombre base>[__esc][__src-<extensión>][__<ancho>x<alto>_<fondo>].
   uno se informa como fallido, con la indicación de renombrar. Las
   demás imágenes del lote se procesan normalmente.
 
-Limitaciones hasta que exista un manifiesto (H-05):
+- **Revisiones `__rev-<12 hex>`:** cuando el nombre base ya pertenece a
+  otro resultado registrado (el original cambió de contenido, se usó
+  otro modelo o cambió la versión del procesamiento), el nuevo
+  resultado agrega este bloque al final. Se deriva del SHA-256 del
+  original, el modelo y la versión del procesamiento, así que es
+  determinista. El resultado anterior se conserva.
 
-- La identidad de un resultado depende solo de su nombre. No se
-  detecta si un original cambió de contenido.
-- El nombre no incluye el modelo: reprocesar con otro modelo omite
-  los resultados existentes de la misma variante.
+## Manifiesto y reprocesamiento
+
+Cada carpeta de destino tiene un manifiesto, `.transformada_manifest.json`,
+que registra para cada PNG:
+
+- el original: ruta relativa a la carpeta de destino, nombre, tamaño y
+  SHA-256;
+- el modelo, el ancho, el alto y el fondo;
+- la versión del procesamiento (`PIPELINE_VERSION`), que se incrementa
+  cuando cambia la semántica del resultado;
+- el SHA-256 del PNG generado y su estado (`pending` o `completed`).
+
+No contiene credenciales ni rutas absolutas, salvo que el original
+esté en otra unidad de Windows.
+
+Política de cada imagen:
+
+| Situación | Resultado |
+|---|---|
+| Mismo original, modelo, opciones y versión, y el PNG coincide con su SHA-256 | Se omite sin cargar el modelo ni reescribir nada |
+| El original cambió de contenido | Nueva revisión `__rev-`; el resultado anterior se conserva |
+| Otro modelo o versión del procesamiento | Nueva revisión `__rev-` |
+| Otro fondo o dimensiones | Otro nombre de variante |
+| El PNG registrado ya no existe | Se regenera con el mismo nombre |
+| El PNG registrado fue modificado | Fallo; nunca se sobrescribe |
+| PNG existente sin registro (anterior al manifiesto) | **Sin verificar**: se conserva, no se da por válido y no se procesa |
+
+Los resultados sin verificar requieren una decisión: revisarlos y
+moverlos, o ejecutar con `--regenerate-unverified`, que genera una
+versión verificada con nombre de revisión y conserva el histórico.
+Nunca se adoptan automáticamente por su nombre. Como no se sabe con
+qué modelo u original se generó un histórico, mientras exista bloquea
+cada nueva combinación de modelo y contenido para ese nombre base: la
+opción se necesita una vez por cada una (por ejemplo, para IS-Net y
+para BiRefNet). Después, cada resultado queda verificado.
+
+Recuperación ante interrupciones: cada imagen se registra en dos fases.
+Antes de publicar el PNG se guarda una entrada `pending`; después, la
+entrada se completa con el SHA-256 del resultado. Si el proceso se
+interrumpe entre ambas, la siguiente ejecución adopta el PNG solo si
+es un PNG completo con el formato exacto de la variante (el destino
+estaba libre y la publicación es exclusiva). Si el PNG no llegó a
+publicarse, la imagen se vuelve a procesar.
+
+El manifiesto se guarda en un temporal y se sustituye de forma atómica;
+si la escritura falla, el anterior queda intacto. Un manifiesto dañado
+o de otra versión detiene el lote antes de procesar y nunca se
+reinicia.
+
+Códigos de salida de la CLI:
+
+| Código | Significado |
+|---|---|
+| 0 | Todo procesado o verificado |
+| 1 | Alguna imagen falló |
+| 2 | Argumentos o carpetas inválidos |
+| 3 | No se pudo inicializar el modelo |
+| 4 | Sin fallos, pero hay resultados sin verificar |
+| 5 | El manifiesto está dañado o no es compatible |
+
+Limitaciones:
+
+- No se admiten lotes concurrentes sobre la misma carpeta de destino.
+- Cada ejecución calcula el SHA-256 de todos los originales elegibles.
 - Agregar un segundo original con el mismo nombre base hace que el
-  primero se vuelva a procesar con el sufijo `__src-`.
-- Un resultado heredado de un original con `__` cuyo original ya no
-  está en la carpeta no puede reconocerse como ajeno.
-- Si el resultado heredado es de la misma variante, solo se detecta
-  mientras el otro original todavía no tenga su resultado con el
-  nombre actual (normalmente, en la primera ejecución con esta
-  versión).
+  primero se vuelva a procesar con el sufijo `__src-` (su resultado
+  anterior se conserva).
+- Si se mueve la carpeta de destino respecto de los originales, la ruta
+  registrada queda desactualizada; la identidad (contenido, modelo,
+  opciones y versión) no cambia.
 
 ## Estado
 

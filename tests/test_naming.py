@@ -8,6 +8,7 @@ from image_processor.naming import (
     is_eligible_source,
     output_name,
     plan_outputs,
+    with_revision,
 )
 from image_processor.processing import OutputOptions
 
@@ -520,3 +521,64 @@ def test_repeated_plan_with_src_like_sibling_has_no_errors():
     assert names(again) == first
     assert all(entry.error is None for entry in again.entries)
     assert again.warnings == []
+
+
+# --- H-05: bloque de revisión ------------------------------------
+
+def test_with_revision():
+    assert (
+        with_revision("TRANSFORMADA_producto__src-jpg.png", "0123456789ab")
+        == "TRANSFORMADA_producto__src-jpg__rev-0123456789ab.png"
+    )
+
+    for invalid in ("0123", "0123456789AB", "../x", "0123456789abc"):
+        with pytest.raises(ValueError):
+            with_revision("TRANSFORMADA_producto.png", invalid)
+
+
+def test_revision_names_remain_unique():
+    revisions = [None, "000000000000", "aaaaaaaaaaaa"]
+    generated = set()
+    total = 0
+
+    for stem in TRICKY_STEMS + ["producto__rev-000000000000"]:
+        for tag in [None, "jpg", "png"]:
+            for options in NAME_VARIANTS:
+                for revision in revisions:
+                    name = output_name(stem, options, tag)
+
+                    if revision is not None:
+                        name = with_revision(name, revision)
+
+                    generated.add(name.casefold())
+                    total += 1
+
+    assert len(generated) == total
+
+
+def test_revision_source_results_are_evidence():
+    result = plan(
+        ["producto.jpg"],
+        existing=["TRANSFORMADA_producto__src-png__rev-aaaaaaaaaaaa.png"],
+    )
+
+    assert names(result) == {
+        "producto.jpg": "TRANSFORMADA_producto__src-jpg.png"
+    }
+
+
+def test_registered_names_skip_legacy_check():
+    sources = [
+        Path("producto.jpg"),
+        Path("producto__800x600_transparent.jpg"),
+    ]
+    legacy = "TRANSFORMADA_producto__800x600_transparent.png"
+
+    unknown = plan_outputs(sources, OUT, TRANSPARENT, [legacy])
+    known = plan_outputs(
+        sources, OUT, TRANSPARENT, [legacy],
+        known_names={legacy.casefold()},
+    )
+
+    assert names(unknown)["producto.jpg"] == "ERROR"
+    assert names(known)["producto.jpg"] == legacy

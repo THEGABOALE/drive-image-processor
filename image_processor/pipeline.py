@@ -5,6 +5,13 @@ from .errors import EmptySegmentationError
 from .processing import OutputOptions, normalize_image
 
 
+# Versión de la semántica del resultado. Se incrementa cuando un
+# cambio en el procesamiento hace que el mismo original, modelo y
+# opciones produzcan un PNG distinto; el manifiesto deja entonces
+# de considerar válidos los resultados anteriores.
+PIPELINE_VERSION = "1"
+
+
 def _ensure_segmentation_not_empty(
         cutout: Image.Image,
         model_name: str,

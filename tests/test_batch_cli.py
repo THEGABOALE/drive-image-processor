@@ -3,6 +3,7 @@ import pytest
 from PIL import Image
 
 from image_processor import background_removal, batch, batch_cli, pipeline
+from image_processor.manifest import MANIFEST_NAME
 
 
 def fake_process(image, model_name, options=None):
@@ -246,7 +247,7 @@ def test_cli_reports_empty_segmentation(
     assert "segmentación está vacía" in captured.err
 
     assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
-        [output_name, "vacia.png", "valida.png"]
+        [MANIFEST_NAME, output_name, "vacia.png", "valida.png"]
     )
 
     for path, content in originals.items():

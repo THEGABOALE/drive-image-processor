@@ -9,6 +9,7 @@ from PIL import Image
 
 from image_processor import background_removal, batch, batch_cli, pipeline
 from image_processor.background_removal import ModelInitializationError
+from image_processor.manifest import MANIFEST_NAME
 from image_processor.processing import OutputOptions
 
 
@@ -176,6 +177,7 @@ def test_batch_same_folder_ignores_temp_files(tmp_path):
     assert recent.read_bytes() == b"en curso"
 
     assert sorted(path.name for path in tmp_path.iterdir()) == [
+        MANIFEST_NAME,
         "TRANSFORMADA_otro.png.abc12_yz.tmp",
         "TRANSFORMADA_producto.png",
         "producto.jpg",
@@ -468,7 +470,8 @@ def test_batch_variants_do_not_collide_or_overwrite(
     for path, content in originals.items():
         assert path.read_bytes() == content
 
-    assert len(list(tmp_path.iterdir())) == 5
+    # Original, cuatro variantes y el manifiesto.
+    assert len(list(tmp_path.iterdir())) == 6
 
 
 def test_batch_existing_variant_is_not_overwritten(
@@ -483,7 +486,9 @@ def test_batch_existing_variant_is_not_overwritten(
 
     result = batch.process_folder(tmp_path, options=options)
 
-    assert (result.processed, result.skipped) == (0, 1)
+    # H-05: sin registro en el manifiesto, el archivo es un
+    # histórico sin verificar; se conserva y no se da por válido.
+    assert (result.processed, result.skipped, result.unverified) == (0, 0, 1)
     assert existing.read_bytes() == b"PREVIO"
 
     # La variante predeterminada es otro resultado.
@@ -786,11 +791,15 @@ def test_existing_same_stem_output_is_not_overwritten(tmp_path, monkeypatch):
 
     result = batch.process_folder(tmp_path)
 
-    assert (result.processed, result.skipped, result.failed) == (2, 1, 0)
+    # H-05: el archivo previo no tiene registro y no se da por válido.
+    assert (result.processed, result.skipped, result.failed) == (2, 0, 0)
+    assert result.unverified == 1
     assert existing.read_bytes() == b"PREVIO"
 
 
-def test_existing_output_with_other_case_is_skipped(tmp_path, monkeypatch):
+def test_existing_output_with_other_case_is_not_overwritten(
+    tmp_path, monkeypatch
+):
     make_colored(tmp_path, {"producto.jpg": (220, 30, 30)})
     monkeypatch.setattr(batch, "process_image", color_copy_process)
 
@@ -802,7 +811,9 @@ def test_existing_output_with_other_case_is_skipped(tmp_path, monkeypatch):
 
     result = batch.process_folder(tmp_path)
 
-    assert (result.processed, result.skipped) == (0, 1)
+    # El nombre coincide sin distinguir mayúsculas: es el mismo
+    # destino, sin registro, así que queda sin verificar.
+    assert (result.processed, result.skipped, result.unverified) == (0, 0, 1)
     assert calls == []
     assert existing.read_bytes() == b"PREVIO"
     assert sorted(path.name for path in tmp_path.iterdir()) == [
@@ -1181,7 +1192,8 @@ def test_unresolvable_collisions_alone_do_not_initialize_model(
 
     result = batch.process_folder(tmp_path)
 
-    assert (result.processed, result.skipped, result.failed) == (0, 1, 2)
+    assert (result.processed, result.skipped, result.failed) == (0, 0, 2)
+    assert result.unverified == 1
     assert calls == []
 
 

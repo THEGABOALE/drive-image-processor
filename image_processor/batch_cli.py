@@ -7,6 +7,7 @@ from .background_removal import (
     ModelInitializationError,
 )
 from .batch import process_folder
+from .manifest import ManifestError
 from .processing import (
     BACKGROUNDS,
     DEFAULT_BACKGROUND,
@@ -19,6 +20,16 @@ from .processing import (
 
 
 def main(argv: list[str] | None = None) -> int:
+    """
+    Códigos de salida:
+
+    0  Todo procesado o verificado.
+    1  Alguna imagen falló.
+    2  Argumentos o carpetas inválidos.
+    3  No se pudo inicializar el modelo.
+    4  Sin fallos, pero hay resultados históricos sin verificar.
+    5  El manifiesto de destino está dañado o no es compatible.
+    """
     parser = argparse.ArgumentParser(
         description="Procesamiento por lotes de fotografías"
     )
@@ -71,6 +82,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    parser.add_argument(
+        "--regenerate-unverified",
+        action="store_true",
+        help=(
+            "Genera una versión verificada, con otro nombre, de las "
+            "imágenes cuyo resultado histórico no figura en el "
+            "manifiesto. Los archivos históricos se conservan."
+        ),
+    )
+
     args = parser.parse_args(argv)
 
     try:
@@ -95,7 +116,17 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output,
             model_name=args.model,
             options=options,
+            regenerate_unverified=args.regenerate_unverified,
         )
+    except ManifestError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        print(
+            "No se procesó ninguna imagen y el manifiesto no se "
+            "modificó. Restáurelo desde una copia o muévalo para "
+            "revisarlo.",
+            file=sys.stderr,
+        )
+        return 5
     except ModelInitializationError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         print(
@@ -113,6 +144,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Omitidas:   {result.skipped}")
     print(f"Fallidas:   {result.failed}")
 
+    if result.unverified:
+        print(f"Sin verificar: {result.unverified}")
+
+    if result.recovered:
+        print(f"Recuperadas: {result.recovered}")
+
     if result.errors:
         print("\nErrores encontrados:")
         for error in result.errors:
@@ -123,7 +160,17 @@ def main(argv: list[str] | None = None) -> int:
         for warning in result.warnings:
             print(f"  - {warning}", file=sys.stderr)
 
-    return 1 if result.failed else 0
+    if result.failed:
+        return 1
+
+    if result.unverified:
+        print(
+            "\nHay resultados históricos sin verificar: requieren "
+            "revisión o --regenerate-unverified."
+        )
+        return 4
+
+    return 0
 
 
 if __name__ == "__main__":
