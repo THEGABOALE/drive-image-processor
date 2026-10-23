@@ -2,7 +2,7 @@
 import pytest
 from PIL import Image
 
-from image_processor import background_removal, batch, batch_cli
+from image_processor import background_removal, batch, batch_cli, pipeline
 
 
 def fake_process(image, model_name, options=None):
@@ -200,3 +200,54 @@ def test_cli_rejects_invalid_argument_values(tmp_path, arguments):
         batch_cli.main(["--input", str(tmp_path), *arguments])
 
     assert error.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "arguments, output_name",
+    [
+        ([], "TRANSFORMADA_valida.png"),
+        (
+            ["--background", "transparent", "--width", "800", "--height", "600"],
+            "TRANSFORMADA_valida__800x600_transparent.png",
+        ),
+    ],
+)
+def test_cli_reports_empty_segmentation(
+    tmp_path, monkeypatch, capsys, arguments, output_name
+):
+    valid = tmp_path / "valida.png"
+    empty = tmp_path / "vacia.png"
+    Image.new("RGB", (50, 50), "red").save(valid)
+    Image.new("RGB", (50, 50), "black").save(empty)
+    originals = {path: path.read_bytes() for path in (valid, empty)}
+
+    def fake_remove_background(image, model_name="isnet-general-use"):
+        cutout = Image.new("RGBA", image.size, (0, 0, 0, 0))
+
+        if image.convert("RGB").getpixel((0, 0)) != (0, 0, 0):
+            cutout.paste((255, 0, 0, 255), (10, 10, 40, 40))
+
+        return cutout
+
+    monkeypatch.setattr(
+        pipeline, "remove_background", fake_remove_background
+    )
+    monkeypatch.setattr(batch, "process_image", pipeline.process_image)
+
+    exit_code = batch_cli.main(["--input", str(tmp_path), *arguments])
+
+    captured = capsys.readouterr()
+
+    # Código 1: fallos individuales, no de inicialización (3).
+    assert exit_code == 1
+    assert "Procesadas: 1" in captured.out
+    assert "Fallidas:   1" in captured.out
+    assert "vacia.png" in captured.err
+    assert "segmentación está vacía" in captured.err
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        [output_name, "vacia.png", "valida.png"]
+    )
+
+    for path, content in originals.items():
+        assert path.read_bytes() == content

@@ -549,3 +549,104 @@ def test_transparent_variant_uses_atomic_write(
 
     for path, content in originals.items():
         assert path.read_bytes() == content
+
+
+def color_segmentation(empty_when_dark=True):
+    """
+    Simula rembg: las fotografías oscuras no tienen producto
+    detectable y devuelven una máscara completamente vacía.
+    """
+
+    def fake_remove_background(image, model_name="isnet-general-use"):
+        cutout = Image.new("RGBA", image.size, (0, 0, 0, 0))
+
+        if empty_when_dark and sum(image.convert("RGB").getpixel((0, 0))) < 60:
+            return cutout
+
+        cutout.paste((255, 0, 0, 255), (10, 10, 40, 40))
+        return cutout
+
+    return fake_remove_background
+
+
+def make_batch_with_empty_segmentation(directory):
+    originals = make_images(directory, ["a.png", "b.png", "c.png", "e.png"])
+
+    dark = directory / "d_vacia.png"
+    Image.new("RGB", (50, 50), "black").save(dark)
+    originals[dark] = dark.read_bytes()
+
+    return originals
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        OutputOptions(),
+        OutputOptions(background="transparent"),
+        OutputOptions(800, 600, "white"),
+        OutputOptions(640, 960, "transparent"),
+    ],
+)
+def test_empty_segmentation_fails_and_batch_continues(
+    tmp_path, monkeypatch, options
+):
+    originals = make_batch_with_empty_segmentation(tmp_path)
+
+    monkeypatch.setattr(
+        pipeline, "remove_background", color_segmentation()
+    )
+    monkeypatch.setattr(batch, "process_image", pipeline.process_image)
+
+    result = batch.process_folder(tmp_path, options=options)
+
+    assert (result.processed, result.failed, result.skipped) == (4, 1, 0)
+    assert len(result.errors) == 1
+    assert result.errors[0].startswith("d_vacia.png: ")
+    assert "segmentación está vacía" in result.errors[0]
+
+    assert not (tmp_path / batch.output_name("d_vacia", options)).exists()
+
+    mode = "RGBA" if options.background == "transparent" else "RGB"
+
+    for name in ("a", "b", "c", "e"):
+        output = tmp_path / batch.output_name(name, options)
+
+        with Image.open(output) as image:
+            image.load()
+            assert image.mode == mode
+            assert image.size == (options.width, options.height)
+
+    assert list(tmp_path.glob("*.tmp")) == []
+
+    for path, content in originals.items():
+        assert path.read_bytes() == content
+
+
+def test_empty_segmentation_can_be_retried(tmp_path, monkeypatch):
+    originals = make_batch_with_empty_segmentation(tmp_path)
+
+    monkeypatch.setattr(batch, "process_image", pipeline.process_image)
+    monkeypatch.setattr(
+        pipeline, "remove_background", color_segmentation()
+    )
+
+    first = batch.process_folder(tmp_path)
+
+    assert (first.processed, first.failed, first.skipped) == (4, 1, 0)
+
+    # Otro modelo o una nueva ejecución sí detecta el producto.
+    monkeypatch.setattr(
+        pipeline,
+        "remove_background",
+        color_segmentation(empty_when_dark=False),
+    )
+
+    second = batch.process_folder(tmp_path)
+
+    assert (second.processed, second.failed, second.skipped) == (1, 0, 4)
+    assert_valid_png(tmp_path / "TRANSFORMADA_d_vacia.png")
+    assert list(tmp_path.glob("*.tmp")) == []
+
+    for path, content in originals.items():
+        assert path.read_bytes() == content
