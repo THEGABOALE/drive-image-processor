@@ -28,6 +28,8 @@ SHA_B = "b" * 64
 
 def identity(**changes):
     values = dict(
+        source_kind="local",
+        source_key="producto.jpg",
         source_sha256=SHA_A,
         model="isnet-general-use",
         width=400,
@@ -217,9 +219,34 @@ def test_invalid_manifest_content_is_rejected(tmp_path, change):
         Manifest.load(tmp_path)
 
 
-def test_pending_entry_must_not_have_output_hash(tmp_path):
+def test_pending_entry_keeps_expected_output_hash(tmp_path):
+    # Evidencia registrada antes de publicar el PNG.
     document = valid_document()
     document["entries"][0]["status"] = PENDING
+    write_document(tmp_path, document)
+
+    [loaded] = Manifest.load(tmp_path).entries()
+
+    assert loaded.status == PENDING
+    assert loaded.output_sha256 == SHA_B
+
+
+def test_pending_entry_without_hash_is_readable(tmp_path):
+    # Versión anterior: se lee, pero no permite recuperar.
+    document = valid_document()
+    document["entries"][0]["status"] = PENDING
+    document["entries"][0]["output_sha256"] = None
+    write_document(tmp_path, document)
+
+    [loaded] = Manifest.load(tmp_path).entries()
+
+    assert loaded.output_sha256 is None
+
+
+def test_pending_entry_with_invalid_hash_is_rejected(tmp_path):
+    document = valid_document()
+    document["entries"][0]["status"] = PENDING
+    document["entries"][0]["output_sha256"] = "x"
     write_document(tmp_path, document)
 
     with pytest.raises(ManifestError):
@@ -338,8 +365,27 @@ def test_revision_depends_on_content_model_and_pipeline():
     assert base.revision() != identity(model="birefnet-general-lite").revision()
     assert base.revision() != identity(pipeline_version="2").revision()
 
+    # H05-R2: otro original con los mismos bytes es otra identidad.
+    other = identity(source_key="../marca_b/producto.jpg")
+    assert other != base
+    assert base.revision() != other.revision()
+    assert base.revision() != identity(source_kind="drive").revision()
+
     # Las opciones ya distinguen el nombre base.
     assert base.revision() == identity(width=800).revision()
+
+
+def test_identity_uses_normalized_source_id(tmp_path):
+    entry_a = entry()
+    document = json.loads(Manifest(tmp_path, [entry_a]).to_json())
+    document["entries"][0]["source"]["id"] = "PRODUCTO.JPG"
+    write_document(tmp_path, document)
+
+    [loaded] = Manifest.load(tmp_path).entries()
+
+    # Mismo original en Windows: la identidad no depende de mayúsculas.
+    assert loaded.identity == entry_a.identity
+    assert loaded.source.id == "PRODUCTO.JPG"
 
 
 def test_local_source_id_is_relative(tmp_path):

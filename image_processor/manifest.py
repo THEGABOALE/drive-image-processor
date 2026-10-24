@@ -76,10 +76,26 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def source_key(source_id: str) -> str:
+    """
+    Identificador del original para comparar identidades: sin
+    distinguir mayúsculas y en forma NFC, como los nombres (H-04).
+    """
+    return name_key(source_id)
+
+
 @dataclass(frozen=True)
 class ResultIdentity:
-    """Lo que determina el contenido de un resultado."""
+    """
+    A qué original y configuración corresponde un resultado.
 
+    Incluye qué original es (source_kind y source_key) además de
+    su contenido: dos originales distintos con los mismos bytes
+    nunca comparten un resultado.
+    """
+
+    source_kind: str
+    source_key: str
     source_sha256: str
     model: str
     width: int
@@ -92,11 +108,17 @@ class ResultIdentity:
         Etiqueta determinista para nombres de revisión.
 
         Las opciones ya forman parte del nombre base; la revisión
-        distingue el contenido del original, el modelo y la
+        distingue el original, su contenido, el modelo y la
         versión del procesamiento.
         """
         text = "\n".join(
-            [self.source_sha256, self.model, self.pipeline_version]
+            [
+                self.source_kind,
+                self.source_key,
+                self.source_sha256,
+                self.model,
+                self.pipeline_version,
+            ]
         )
 
         return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
@@ -118,6 +140,12 @@ class SourceRecord:
 
 @dataclass(frozen=True)
 class ManifestEntry:
+    """
+    output_sha256 es el hash del PNG publicado (completed) o el del
+    PNG que se va a publicar (pending): la evidencia que permite
+    recuperar un resultado tras una interrupción.
+    """
+
     output_name: str
     status: str
     identity: ResultIdentity
@@ -180,15 +208,17 @@ def _parse_entry(raw, index: int) -> ManifestEntry:
     _require(raw["status"] in STATUSES, f"{where}: estado desconocido")
 
     output_sha256 = raw["output_sha256"]
+    valid_hash = (
+        isinstance(output_sha256, str)
+        and _SHA256.fullmatch(output_sha256) is not None
+    )
 
-    if raw["status"] == COMPLETED:
-        _require(
-            isinstance(output_sha256, str)
-            and _SHA256.fullmatch(output_sha256) is not None,
-            f"{where}: output_sha256 inválido",
-        )
-    else:
-        _require(output_sha256 is None, f"{where}: pendiente con hash")
+    # Una entrada pendiente sin hash (anterior a esta regla) se lee,
+    # pero no permite recuperar el resultado.
+    _require(
+        valid_hash or (raw["status"] == PENDING and output_sha256 is None),
+        f"{where}: output_sha256 inválido",
+    )
 
     source = raw["source"]
     _require(
@@ -231,6 +261,8 @@ def _parse_entry(raw, index: int) -> ManifestEntry:
         output_name=raw["output_name"],
         status=raw["status"],
         identity=ResultIdentity(
+            source_kind=source["kind"],
+            source_key=source_key(source["id"]),
             source_sha256=source["sha256"],
             model=raw["model"],
             width=options["width"],

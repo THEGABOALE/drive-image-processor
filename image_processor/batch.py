@@ -1,4 +1,6 @@
 
+import hashlib
+import io
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,11 +19,11 @@ from .manifest import (
     file_sha256,
     local_source_id,
     now_utc,
+    source_key,
 )
 from .naming import (  # noqa: F401 (se reexportan)
     OUTPUT_PREFIX,
     SUPPORTED_EXTENSIONS,
-    expected_format,
     is_eligible_source,
     name_key,
     output_name,
@@ -42,6 +44,8 @@ class BatchResult:
     warnings: list[str] = field(default_factory=list)
     unverified: int = 0
     recovered: int = 0
+    # PNG publicados cuyo registro quedó pendiente de recuperación.
+    unregistered: int = 0
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,18 @@ class _Decision:
     output_name: str | None = None
     message: str | None = None
     warning: str | None = None
+    # Pendiente cuyo archivo no coincide con la evidencia registrada.
+    unproven: bool = False
+
+
+class _EncodedPNG:
+    """PNG ya codificado: save_png_exclusive lo publica byte a byte."""
+
+    def __init__(self, data: bytes):
+        self.data = data
+
+    def save(self, fp, format=None):
+        fp.write(self.data)
 
 
 def _discover_sources(input_dir: Path) -> list[Path]:
@@ -72,25 +88,7 @@ def _describe_output(path: Path):
         return None
 
 
-def _is_complete_png(path: Path, options: OutputOptions) -> bool:
-    """PNG legible por completo y con el formato exacto de la variante."""
-
-    try:
-        with Image.open(path) as image:
-            if image.format != "PNG":
-                return False
-
-            if (image.size, image.mode) != expected_format(options):
-                return False
-
-            image.load()
-    except Exception:
-        return False
-
-    return True
-
-
-def _check_registered(entry, output_dir, options, exists) -> _Decision:
+def _check_registered(entry, output_dir, exists) -> _Decision:
     """Estado de un resultado que el manifiesto atribuye a esta identidad."""
 
     name = entry.output_name
@@ -101,18 +99,25 @@ def _check_registered(entry, output_dir, options, exists) -> _Decision:
         if not exists(name):
             return _Decision("process", name)
 
-        # El destino estaba libre y la publicación es exclusiva:
-        # si el PNG está completo, lo publicó esta aplicación.
-        if _is_complete_png(path, options):
+        # Solo se adopta el archivo cuyos bytes coinciden con el
+        # SHA-256 registrado antes de publicarlo.
+        try:
+            actual = file_sha256(path)
+        except OSError:
+            actual = None
+
+        if entry.output_sha256 is not None and actual == entry.output_sha256:
             return _Decision("recover", name)
 
         return _Decision(
-            "failed",
+            "unverified",
+            name,
             message=(
-                f"{name} quedó pendiente de registro y no es un PNG "
-                "completo de esta variante. No se adopta ni se "
-                "sobrescribe."
+                f"{name} quedó pendiente de registro, pero su contenido "
+                "no coincide con el resultado que se iba a publicar. "
+                "Se conserva y no se da por válido."
             ),
+            unproven=True,
         )
 
     if not exists(name):
@@ -144,7 +149,6 @@ def _decide(
     source,
     base_name,
     identity,
-    options,
     manifest,
     output_dir,
     exists,
@@ -156,18 +160,32 @@ def _decide(
     1. Si el manifiesto registra esta identidad con el nombre base o
        con su nombre de revisión, se verifica ese resultado.
     2. Si el nombre base está libre, se usa.
-    3. Si el nombre base pertenece a otra identidad (otro contenido,
-       modelo o versión), se usa el nombre de revisión.
-    4. Si el nombre base existe sin registro, es un resultado
-       histórico sin verificar: se conserva y no se da por válido.
+    3. Si el nombre base pertenece a otra identidad (otro original,
+       otro contenido, modelo o versión), se usa el nombre de revisión.
+    4. Si el nombre base existe sin registro (o con un registro
+       pendiente que no se puede demostrar), es un resultado sin
+       verificar: se conserva y no se da por válido.
     """
     revision_name = with_revision(base_name, identity.revision())
 
     for name in (base_name, revision_name):
         entry = manifest.get(name)
 
-        if entry is not None and entry.identity == identity:
-            return _check_registered(entry, output_dir, options, exists)
+        if entry is None or entry.identity != identity:
+            continue
+
+        decision = _check_registered(entry, output_dir, exists)
+
+        if not (
+            decision.unproven
+            and regenerate_unverified
+            and name_key(name) == name_key(base_name)
+        ):
+            return decision
+
+        # El archivo del nombre base no se puede atribuir: se olvida
+        # la entrada pendiente y se trata como histórico sin verificar.
+        manifest.remove(name)
 
     base_entry = manifest.get(base_name)
     note = None
@@ -189,14 +207,20 @@ def _decide(
             )
 
         note = (
-            f"{base_name}: resultado histórico sin verificar; se "
-            f"conserva y se genera {revision_name}."
+            f"{base_name}: resultado sin verificar; se conserva y se "
+            f"genera {revision_name}."
         )
 
-    elif (
-        name_key(base_entry.source.name) == name_key(source.name)
-        and base_entry.identity.source_sha256 != identity.source_sha256
+    elif base_entry.identity.source_key != identity.source_key or (
+        base_entry.identity.source_kind != identity.source_kind
     ):
+        note = (
+            f"{base_name} pertenece a otro original "
+            f"({base_entry.source.id}); para {source.name} se genera "
+            f"{revision_name}."
+        )
+
+    elif base_entry.identity.source_sha256 != identity.source_sha256:
         note = (
             f"{source.name}: el original cambió desde que se generó "
             f"{base_name}; se conserva y se genera {revision_name}."
@@ -221,23 +245,6 @@ def _decide(
         )
 
     return _Decision("process", revision_name, warning=note)
-
-
-def _restore(manifest, name, previous, summary) -> None:
-    """Deshace una entrada pendiente que no llegó a completarse."""
-
-    if previous is None:
-        manifest.remove(name)
-    else:
-        manifest.put(previous)
-
-    try:
-        manifest.save()
-    except ManifestError as exc:
-        summary.warnings.append(
-            f"{name}: no se pudo actualizar el manifiesto ({exc}). "
-            "La próxima ejecución lo volverá a intentar."
-        )
 
 
 def process_folder(
@@ -289,12 +296,36 @@ def process_folder(
     summary = BatchResult()
     pending = []
 
+    # Resultados publicados cuyo registro completo no se guardó.
+    unsaved: list[str] = []
+
     # Restos de ejecuciones interrumpidas.
     summary.temp_removed = remove_stale_temp_files(
         output_dir, prefix=OUTPUT_PREFIX
     )
 
     manifest = Manifest.load(output_dir)
+
+    def save_manifest() -> None:
+        manifest.save()
+        # Cada guardado escribe el estado completo en memoria.
+        unsaved.clear()
+
+    def restore(name, previous) -> None:
+        """Deshace una entrada que no llegó a completarse."""
+
+        if previous is None:
+            manifest.remove(name)
+        else:
+            manifest.put(previous)
+
+        try:
+            save_manifest()
+        except ManifestError as exc:
+            summary.warnings.append(
+                f"{name}: no se pudo actualizar el manifiesto ({exc}). "
+                "La próxima ejecución lo volverá a intentar."
+            )
 
     existing_names = [path.name for path in output_dir.iterdir()]
     existing = {name_key(name) for name in existing_names}
@@ -331,15 +362,6 @@ def process_folder(
             summary.errors.append(f"{source.name}: {exc}")
             continue
 
-        identity = ResultIdentity(
-            source_sha256=source_sha256,
-            model=model_name,
-            width=options.width,
-            height=options.height,
-            background=options.background,
-            pipeline_version=PIPELINE_VERSION,
-        )
-
         record = SourceRecord(
             kind="local",
             id=local_source_id(source, output_dir),
@@ -348,11 +370,21 @@ def process_folder(
             sha256=source_sha256,
         )
 
+        identity = ResultIdentity(
+            source_kind=record.kind,
+            source_key=source_key(record.id),
+            source_sha256=source_sha256,
+            model=model_name,
+            width=options.width,
+            height=options.height,
+            background=options.background,
+            pipeline_version=PIPELINE_VERSION,
+        )
+
         decision = _decide(
             source,
             entry.output_path.name,
             identity,
-            options,
             manifest,
             output_dir,
             exists,
@@ -377,20 +409,20 @@ def process_folder(
             name = decision.output_name
             registered = manifest.get(name)
 
-            try:
-                output_sha256 = file_sha256(output_dir / name)
-                manifest.put(
-                    ManifestEntry(
-                        output_name=registered.output_name,
-                        status=COMPLETED,
-                        identity=registered.identity,
-                        source=registered.source,
-                        output_sha256=output_sha256,
-                        recorded_at=now_utc(),
-                    )
+            manifest.put(
+                ManifestEntry(
+                    output_name=registered.output_name,
+                    status=COMPLETED,
+                    identity=registered.identity,
+                    source=registered.source,
+                    output_sha256=registered.output_sha256,
+                    recorded_at=now_utc(),
                 )
-                manifest.save()
-            except (OSError, ManifestError) as exc:
+            )
+
+            try:
+                save_manifest()
+            except ManifestError as exc:
                 manifest.put(registered)
                 summary.failed += 1
                 summary.errors.append(f"{source.name}: {exc}")
@@ -413,20 +445,42 @@ def process_folder(
         output_path = output_dir / name
         previous = manifest.get(name)
 
-        # Primera fase: se registra la intención antes de publicar.
+        try:
+            with Image.open(source) as image:
+                result = process_image(
+                    image,
+                    model_name=identity.model,
+                    options=options,
+                )
+
+            # Se codifica en memoria para conocer el SHA-256 del PNG
+            # antes de publicarlo.
+            buffer = io.BytesIO()
+            result.save(buffer, format="PNG")
+            data = buffer.getvalue()
+
+        except Exception as exc:
+            summary.failed += 1
+            summary.errors.append(f"{source.name}: {exc}")
+            print(f"[ERROR] {source.name}")
+            continue
+
+        output_sha256 = hashlib.sha256(data).hexdigest()
+
+        # Primera fase: se registra la intención y su evidencia.
         manifest.put(
             ManifestEntry(
                 output_name=name,
                 status=PENDING,
                 identity=identity,
                 source=record,
-                output_sha256=None,
+                output_sha256=output_sha256,
                 recorded_at=now_utc(),
             )
         )
 
         try:
-            manifest.save()
+            save_manifest()
         except ManifestError as exc:
             if previous is None:
                 manifest.remove(name)
@@ -439,19 +493,12 @@ def process_folder(
             continue
 
         try:
-            with Image.open(source) as image:
-                result = process_image(
-                    image,
-                    model_name=identity.model,
-                    options=options,
-                )
-
             # Publicación atómica: nunca sobrescribe
             # ni deja resultados parciales.
-            save_png_exclusive(result, output_path)
+            save_png_exclusive(_EncodedPNG(data), output_path)
 
         except FileExistsError:
-            _restore(manifest, name, previous, summary)
+            restore(name, previous)
             summary.failed += 1
             summary.errors.append(
                 f"{source.name}: apareció {name} sin registro durante "
@@ -461,32 +508,39 @@ def process_folder(
             continue
 
         except Exception as exc:
-            _restore(manifest, name, previous, summary)
+            restore(name, previous)
             summary.failed += 1
             summary.errors.append(f"{source.name}: {exc}")
             print(f"[ERROR] {source.name}")
             continue
 
         # Segunda fase: el PNG está publicado; se completa el registro.
+        manifest.put(
+            ManifestEntry(
+                output_name=name,
+                status=COMPLETED,
+                identity=identity,
+                source=record,
+                output_sha256=output_sha256,
+                recorded_at=now_utc(),
+            )
+        )
+
         try:
-            manifest.put(
-                ManifestEntry(
-                    output_name=name,
-                    status=COMPLETED,
-                    identity=identity,
-                    source=record,
-                    output_sha256=file_sha256(output_path),
-                    recorded_at=now_utc(),
-                )
-            )
-            manifest.save()
-        except (OSError, ManifestError) as exc:
-            summary.warnings.append(
-                f"{name}: se publicó, pero no se pudo completar su "
-                f"registro ({exc}). Se recuperará en la próxima ejecución."
-            )
+            save_manifest()
+        except ManifestError:
+            unsaved.append(name)
 
         summary.processed += 1
         print(f"[OK] {source.name}")
+
+    # Lo que ningún guardado posterior llegó a persistir.
+    summary.unregistered = len(unsaved)
+
+    for name in unsaved:
+        summary.warnings.append(
+            f"{name}: se publicó, pero su registro quedó pendiente. "
+            "La próxima ejecución lo recuperará."
+        )
 
     return summary

@@ -92,11 +92,12 @@ TRANSFORMADA_<nombre base>[__esc][__src-<extensión>][__<ancho>x<alto>_<fondo>].
   demás imágenes del lote se procesan normalmente.
 
 - **Revisiones `__rev-<12 hex>`:** cuando el nombre base ya pertenece a
-  otro resultado registrado (el original cambió de contenido, se usó
-  otro modelo o cambió la versión del procesamiento), el nuevo
-  resultado agrega este bloque al final. Se deriva del SHA-256 del
-  original, el modelo y la versión del procesamiento, así que es
-  determinista. El resultado anterior se conserva.
+  otro resultado registrado (otro original con el mismo nombre, un
+  cambio de contenido, otro modelo o una nueva versión del
+  procesamiento), el nuevo resultado agrega este bloque al final. Se
+  deriva del SHA-256 de (tipo e identificador del original, contenido,
+  modelo, versión del procesamiento), así que es determinista. El
+  resultado anterior se conserva.
 
 ## Manifiesto y reprocesamiento
 
@@ -113,12 +114,21 @@ que registra para cada PNG:
 No contiene credenciales ni rutas absolutas, salvo que el original
 esté en otra unidad de Windows.
 
+La **identidad** de un resultado es: qué original es (tipo e
+identificador; en local, su ruta relativa, sin distinguir mayúsculas),
+su contenido (SHA-256), el modelo, las opciones y la versión del
+procesamiento. Dos originales distintos nunca comparten un resultado,
+aunque tengan los mismos bytes: por ejemplo, `marca_A/producto.jpg` y
+`marca_B/producto.jpg` procesados hacia el mismo destino. En Google
+Drive, el identificador será el `fileId`.
+
 Política de cada imagen:
 
 | Situación | Resultado |
 |---|---|
-| Mismo original, modelo, opciones y versión, y el PNG coincide con su SHA-256 | Se omite sin cargar el modelo ni reescribir nada |
+| Misma identidad y el PNG coincide con su SHA-256 | Se omite sin cargar el modelo ni reescribir nada |
 | El original cambió de contenido | Nueva revisión `__rev-`; el resultado anterior se conserva |
+| Otro original con el mismo nombre base (otra carpeta) | Nueva revisión `__rev-` |
 | Otro modelo o versión del procesamiento | Nueva revisión `__rev-` |
 | Otro fondo o dimensiones | Otro nombre de variante |
 | El PNG registrado ya no existe | Se regenera con el mismo nombre |
@@ -135,12 +145,21 @@ opción se necesita una vez por cada una (por ejemplo, para IS-Net y
 para BiRefNet). Después, cada resultado queda verificado.
 
 Recuperación ante interrupciones: cada imagen se registra en dos fases.
-Antes de publicar el PNG se guarda una entrada `pending`; después, la
-entrada se completa con el SHA-256 del resultado. Si el proceso se
-interrumpe entre ambas, la siguiente ejecución adopta el PNG solo si
-es un PNG completo con el formato exacto de la variante (el destino
-estaba libre y la publicación es exclusiva). Si el PNG no llegó a
-publicarse, la imagen se vuelve a procesar.
+
+1. El PNG se codifica en memoria y se guarda una entrada `pending` con
+   el SHA-256 de esos bytes exactos: la evidencia.
+2. Se publican esos mismos bytes (sin sobrescribir).
+3. La entrada pasa a `completed`.
+
+Si el proceso se interrumpe entre la publicación y el registro, la
+siguiente ejecución adopta el PNG **solo si su SHA-256 coincide con la
+evidencia**; no basta con que tenga el tamaño o el formato esperados. Un
+archivo ajeno o dañado en ese lugar queda sin verificar y se conserva
+(con `--regenerate-unverified` se genera una versión verificada con
+nombre de revisión). Si el PNG no llegó a publicarse, la imagen se
+vuelve a procesar. Si el lote publica un PNG, pero no logra guardar su
+registro completo, termina con el código 6 y la siguiente ejecución
+lo recupera.
 
 El manifiesto se guarda en un temporal y se sustituye de forma atómica;
 si la escritura falla, el anterior queda intacto. Un manifiesto dañado
@@ -157,6 +176,9 @@ Códigos de salida de la CLI:
 | 3 | No se pudo inicializar el modelo |
 | 4 | Sin fallos, pero hay resultados sin verificar |
 | 5 | El manifiesto está dañado o no es compatible |
+| 6 | Sin fallos, pero algún PNG publicado quedó con el registro pendiente |
+
+Si se cumplen varias condiciones, prevalecen en este orden: 1, 6 y 4.
 
 Limitaciones:
 
@@ -165,9 +187,12 @@ Limitaciones:
 - Agregar un segundo original con el mismo nombre base hace que el
   primero se vuelva a procesar con el sufijo `__src-` (su resultado
   anterior se conserva).
-- Si se mueve la carpeta de destino respecto de los originales, la ruta
-  registrada queda desactualizada; la identidad (contenido, modelo,
-  opciones y versión) no cambia.
+- La identidad local depende de la ruta del original relativa a la
+  carpeta de destino. Si se mueve una carpeta respecto de la otra, o se
+  renombra un original, se generan revisiones nuevas (nada se
+  sobrescribe ni se atribuye a otro original).
+- Una entrada `pending` creada por la versión anterior del manifiesto
+  (sin SHA-256) no permite recuperar su PNG: queda sin verificar.
 
 ## Estado
 

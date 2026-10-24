@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from image_processor import batch, batch_cli, pipeline
+from image_processor import background_removal, batch, batch_cli, pipeline
 from image_processor import manifest as manifest_module
 from image_processor.errors import EmptySegmentationError
 from image_processor.manifest import (
@@ -16,6 +16,8 @@ from image_processor.manifest import (
     Manifest,
     ResultIdentity,
     file_sha256,
+    local_source_id,
+    source_key,
 )
 from image_processor.naming import with_revision
 from image_processor.processing import OutputOptions
@@ -49,8 +51,14 @@ def fake_ai(monkeypatch):
 
         return Image.new("RGB", (options.width, options.height), color)
 
+    def forbidden_session(model_name):
+        raise AssertionError("una prueba intentó usar un modelo real")
+
     monkeypatch.setattr(batch, "process_image", fake_process)
     monkeypatch.setattr(batch, "prepare_model", loads.append)
+    monkeypatch.setattr(
+        background_removal, "new_session", forbidden_session
+    )
 
     return loads
 
@@ -97,8 +105,11 @@ def close(pixel, color):
     return all(abs(a - b) <= 12 for a, b in zip(pixel, color))
 
 
-def revision_name(base, source, model=ISNET):
+def revision_name(base, source, model=ISNET, output_dir=None):
+    output_dir = output_dir or source.parent
     identity = ResultIdentity(
+        source_kind="local",
+        source_key=source_key(local_source_id(source, output_dir)),
         source_sha256=file_sha256(source),
         model=model,
         width=400,
@@ -357,11 +368,10 @@ def test_failed_manifest_write_does_not_publish(tmp_path, monkeypatch):
     def failing_replace(source, target):
         raise OSError("disco lleno")
 
-    monkeypatch.setattr(manifest_module.os, "replace", failing_replace)
+    with monkeypatch.context() as patch:
+        patch.setattr(manifest_module.os, "replace", failing_replace)
 
-    result = batch.process_folder(tmp_path)
-
-    monkeypatch.undo()
+        result = batch.process_folder(tmp_path)
 
     # La imagen nueva no se publica sin su registro previo.
     assert (result.processed, result.skipped, result.failed) == (0, 2, 1)
@@ -394,12 +404,12 @@ def test_published_png_without_completed_entry_is_recovered(
     make(tmp_path, {"producto.jpg": RED})
 
     # Primera fase guardada; la interrupción llega al completar.
-    interrupt_on_save(monkeypatch, 2)
+    with monkeypatch.context() as patch:
+        interrupt_on_save(patch, 2)
 
-    with pytest.raises(KeyboardInterrupt):
-        batch.process_folder(tmp_path)
+        with pytest.raises(KeyboardInterrupt):
+            batch.process_folder(tmp_path)
 
-    monkeypatch.undo()
     monkeypatch.setattr(batch, "prepare_model", fake_ai.append)
     fake_ai.clear()
 
@@ -422,41 +432,41 @@ def test_published_png_without_completed_entry_is_recovered(
     assert (again.skipped, again.recovered) == (1, 0)
 
 
-def test_interruption_before_publishing_is_retried(tmp_path, monkeypatch):
+def test_interruption_during_processing_is_retried(tmp_path, monkeypatch):
     make(tmp_path, {"producto.jpg": RED})
 
     def interrupted(image, model_name, options=None):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(batch, "process_image", interrupted)
+    with monkeypatch.context() as patch:
+        patch.setattr(batch, "process_image", interrupted)
 
-    with pytest.raises(KeyboardInterrupt):
-        batch.process_folder(tmp_path)
+        with pytest.raises(KeyboardInterrupt):
+            batch.process_folder(tmp_path)
 
-    monkeypatch.undo()
-
+    # La entrada pendiente se registra después de codificar el PNG,
+    # cuando ya se conoce su SHA-256: aquí no hay nada registrado.
     assert not (tmp_path / "TRANSFORMADA_producto.png").exists()
-    assert entries_by_name(tmp_path)["TRANSFORMADA_producto.png"]["status"] == (
-        PENDING
-    )
+    assert not (tmp_path / MANIFEST_NAME).exists()
+
+    assert batch.process_folder(tmp_path).processed == 1
 
 
 def test_pending_entry_with_foreign_file_is_not_adopted(tmp_path, monkeypatch):
     make(tmp_path, {"producto.jpg": RED})
-    interrupt_on_save(monkeypatch, 2)
+    with monkeypatch.context() as patch:
+        interrupt_on_save(patch, 2)
 
-    with pytest.raises(KeyboardInterrupt):
-        batch.process_folder(tmp_path)
+        with pytest.raises(KeyboardInterrupt):
+            batch.process_folder(tmp_path)
 
-    monkeypatch.undo()
-
-    # El archivo pendiente no tiene el formato de la variante.
+    # El archivo pendiente no coincide con la evidencia registrada.
     output = tmp_path / "TRANSFORMADA_producto.png"
     output.write_bytes(b"no es un PNG")
 
     result = batch.process_folder(tmp_path)
 
-    assert (result.recovered, result.failed) == (0, 1)
+    assert (result.recovered, result.failed, result.unverified) == (0, 0, 1)
     assert output.read_bytes() == b"no es un PNG"
 
 
@@ -631,3 +641,271 @@ def test_failed_regeneration_keeps_previous_entry(tmp_path, monkeypatch):
 
     assert result.failed == 1
     assert entries_by_name(tmp_path)[output.name] == previous
+
+
+# --- Auditoría correctiva H-05 ---------------------------------------
+
+def interrupt_publication(monkeypatch):
+    """Interrumpe después de registrar la entrada pendiente."""
+
+    def interrupted(image, path):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(batch, "save_png_exclusive", interrupted)
+
+
+# H05-R1: recuperación verificable -------------------------------------
+
+def test_foreign_png_in_place_of_pending_result_is_not_adopted(
+    tmp_path, monkeypatch, capsys
+):
+    make(tmp_path, {"producto.jpg": RED})
+    with monkeypatch.context() as patch:
+        interrupt_publication(patch)
+
+        with pytest.raises(KeyboardInterrupt):
+            batch.process_folder(tmp_path)
+
+    monkeypatch.setattr(batch, "prepare_model", lambda model_name: None)
+
+    output = tmp_path / "TRANSFORMADA_producto.png"
+    assert not output.exists()
+
+    # PNG válido, mismo tamaño y modo, contenido completamente distinto.
+    Image.new("RGB", (400, 400), BLUE).save(output)
+    foreign = output.read_bytes()
+
+    exit_code = batch_cli.main(["--input", str(tmp_path)])
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 4
+    assert "Recuperadas" not in captured.out
+    assert "Sin verificar: 1" in captured.out
+    assert output.read_bytes() == foreign
+    assert entries_by_name(tmp_path)[output.name]["status"] == PENDING
+
+
+def test_genuine_result_after_interruption_is_recovered(
+    tmp_path, monkeypatch, fake_ai
+):
+    make(tmp_path, {"producto.jpg": RED})
+
+    # El PNG se publica y la interrupción llega al completar el registro.
+    with monkeypatch.context() as patch:
+        interrupt_on_save(patch, 2)
+
+        with pytest.raises(KeyboardInterrupt):
+            batch.process_folder(tmp_path)
+
+    fake_ai.clear()
+
+    output = tmp_path / "TRANSFORMADA_producto.png"
+    published = output.read_bytes()
+
+    pending = entries_by_name(tmp_path)[output.name]
+    assert pending["status"] == PENDING
+    # Evidencia registrada antes de publicar.
+    assert pending["output_sha256"] == file_sha256(output)
+
+    result = batch.process_folder(tmp_path)
+
+    assert (result.recovered, result.unverified, result.failed) == (1, 0, 0)
+    assert fake_ai == []
+    assert output.read_bytes() == published
+    assert entries_by_name(tmp_path)[output.name]["status"] == COMPLETED
+
+
+def test_corrupted_pending_result_is_not_adopted(tmp_path, monkeypatch):
+    make(tmp_path, {"producto.jpg": RED})
+    with monkeypatch.context() as patch:
+        interrupt_on_save(patch, 2)
+
+        with pytest.raises(KeyboardInterrupt):
+            batch.process_folder(tmp_path)
+
+    output = tmp_path / "TRANSFORMADA_producto.png"
+    data = output.read_bytes()
+    output.write_bytes(data[: len(data) // 2])
+    truncated = output.read_bytes()
+
+    result = batch.process_folder(tmp_path)
+
+    assert (result.recovered, result.processed, result.unverified) == (0, 0, 1)
+    assert output.read_bytes() == truncated
+
+
+def test_interruption_before_pending_record_leaves_nothing(
+    tmp_path, monkeypatch
+):
+    make(tmp_path, {"producto.jpg": RED})
+    with monkeypatch.context() as patch:
+        interrupt_on_save(patch, 1)
+
+        with pytest.raises(KeyboardInterrupt):
+            batch.process_folder(tmp_path)
+
+    assert not (tmp_path / "TRANSFORMADA_producto.png").exists()
+    assert not (tmp_path / MANIFEST_NAME).exists()
+
+    result = batch.process_folder(tmp_path)
+
+    assert result.processed == 1
+
+
+def test_interruption_after_pending_record_is_retried(tmp_path, monkeypatch):
+    make(tmp_path, {"producto.jpg": RED})
+    with monkeypatch.context() as patch:
+        interrupt_publication(patch)
+
+        with pytest.raises(KeyboardInterrupt):
+            batch.process_folder(tmp_path)
+
+    output = tmp_path / "TRANSFORMADA_producto.png"
+    assert not output.exists()
+    assert entries_by_name(tmp_path)[output.name]["status"] == PENDING
+
+    result = batch.process_folder(tmp_path)
+
+    assert (result.processed, result.recovered) == (1, 0)
+    entry = entries_by_name(tmp_path)[output.name]
+    assert entry["status"] == COMPLETED
+    assert entry["output_sha256"] == file_sha256(output)
+
+
+def test_unproven_pending_result_can_be_regenerated(tmp_path, monkeypatch):
+    make(tmp_path, {"producto.jpg": RED})
+    with monkeypatch.context() as patch:
+        interrupt_publication(patch)
+
+        with pytest.raises(KeyboardInterrupt):
+            batch.process_folder(tmp_path)
+
+    foreign = tmp_path / "TRANSFORMADA_producto.png"
+    Image.new("RGB", (400, 400), BLUE).save(foreign)
+    foreign_bytes = foreign.read_bytes()
+
+    result = batch.process_folder(tmp_path, regenerate_unverified=True)
+
+    assert (result.processed, result.unverified) == (1, 0)
+    assert foreign.read_bytes() == foreign_bytes
+
+    revisions = [
+        name for name in entries_by_name(tmp_path) if "__rev-" in name
+    ]
+    assert len(revisions) == 1
+    assert close(center(tmp_path / revisions[0]), RED)
+    assert foreign.name not in entries_by_name(tmp_path)
+
+
+# H05-R2: identidad del original ---------------------------------------
+
+def test_identical_bytes_from_other_folder_are_a_different_original(
+    tmp_path, fake_ai
+):
+    outputs = tmp_path / "resultados"
+    folders = []
+
+    for name in ("marca_A", "marca_B"):
+        folder = tmp_path / name
+        folder.mkdir()
+        make(folder, {"producto.jpg": RED})
+        folders.append(folder)
+
+    assert (folders[0] / "producto.jpg").read_bytes() == (
+        folders[1] / "producto.jpg"
+    ).read_bytes()
+
+    first = batch.process_folder(folders[0], outputs)
+    first_output = outputs / "TRANSFORMADA_producto.png"
+    first_bytes = first_output.read_bytes()
+
+    second = batch.process_folder(folders[1], outputs)
+
+    assert first.processed == 1
+    # No puede reutilizar el resultado atribuido a marca_A.
+    assert (second.processed, second.skipped) == (1, 0)
+    assert first_output.read_bytes() == first_bytes
+
+    ids = sorted(
+        item["source"]["id"] for item in entries_by_name(outputs).values()
+    )
+    assert ids == ["../marca_A/producto.jpg", "../marca_B/producto.jpg"]
+
+    by_id = {
+        item["source"]["id"]: name
+        for name, item in entries_by_name(outputs).items()
+    }
+    assert by_id["../marca_A/producto.jpg"] == first_output.name
+    assert "__rev-" in by_id["../marca_B/producto.jpg"]
+
+    fake_ai.clear()
+
+    for folder in folders:
+        again = batch.process_folder(folder, outputs)
+        assert (again.processed, again.skipped) == (0, 1)
+
+    assert fake_ai == []
+
+
+# H05-R3: registro incompleto ------------------------------------------
+
+def fail_replace_calls(monkeypatch, failing_calls):
+    real_replace = os.replace
+    calls = []
+
+    def replace(source, target):
+        calls.append(target)
+        if len(calls) in failing_calls:
+            raise OSError("disco lleno")
+        real_replace(source, target)
+
+    monkeypatch.setattr(manifest_module.os, "replace", replace)
+
+
+def test_unregistered_result_is_not_reported_as_success(
+    tmp_path, monkeypatch, capsys
+):
+    make(tmp_path, {"producto.jpg": RED})
+
+    # 1: entrada pendiente; 2: entrada completada (falla).
+    with monkeypatch.context() as patch:
+        fail_replace_calls(patch, {2})
+
+        exit_code = batch_cli.main(["--input", str(tmp_path)])
+
+        captured = capsys.readouterr()
+
+        assert exit_code not in (0, 4)
+        assert "Sin registrar: 1" in captured.out
+        assert (tmp_path / "TRANSFORMADA_producto.png").exists()
+
+    # La siguiente ejecución completa el registro.
+    exit_code = batch_cli.main(["--input", str(tmp_path)])
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Recuperadas: 1" in captured.out
+    assert entries_by_name(tmp_path)["TRANSFORMADA_producto.png"][
+        "status"
+    ] == COMPLETED
+
+
+def test_later_save_persists_an_earlier_completion(tmp_path, monkeypatch):
+    make(tmp_path, {"a.jpg": RED, "b.jpg": GREEN})
+
+    # Falla solo el registro completo de a.jpg; el de b.jpg lo persiste.
+    with monkeypatch.context() as patch:
+        fail_replace_calls(patch, {2})
+
+        result = batch.process_folder(tmp_path)
+
+    assert (result.processed, result.failed) == (2, 0)
+    assert getattr(result, "unregistered", 0) == 0
+    assert {
+        name: item["status"] for name, item in entries_by_name(tmp_path).items()
+    } == {
+        "TRANSFORMADA_a.png": COMPLETED,
+        "TRANSFORMADA_b.png": COMPLETED,
+    }

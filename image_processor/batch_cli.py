@@ -27,8 +27,13 @@ def main(argv: list[str] | None = None) -> int:
     1  Alguna imagen falló.
     2  Argumentos o carpetas inválidos.
     3  No se pudo inicializar el modelo.
-    4  Sin fallos, pero hay resultados históricos sin verificar.
+    4  Sin fallos, pero hay resultados sin verificar.
     5  El manifiesto de destino está dañado o no es compatible.
+    6  Sin fallos, pero algún PNG publicado quedó con su registro
+       pendiente (se recupera en la siguiente ejecución).
+
+    Si se cumplen varias condiciones, prevalece la primera de esta
+    lista: 1, 6 y luego 4.
     """
     parser = argparse.ArgumentParser(
         description="Procesamiento por lotes de fotografías"
@@ -150,6 +155,9 @@ def main(argv: list[str] | None = None) -> int:
     if result.recovered:
         print(f"Recuperadas: {result.recovered}")
 
+    if result.unregistered:
+        print(f"Sin registrar: {result.unregistered}")
+
     if result.errors:
         print("\nErrores encontrados:")
         for error in result.errors:
@@ -163,10 +171,18 @@ def main(argv: list[str] | None = None) -> int:
     if result.failed:
         return 1
 
+    if result.unregistered:
+        print(
+            "\nHay resultados publicados con el registro pendiente: "
+            "no están verificados. Vuelva a ejecutar el lote para "
+            "completarlo."
+        )
+        return 6
+
     if result.unverified:
         print(
-            "\nHay resultados históricos sin verificar: requieren "
-            "revisión o --regenerate-unverified."
+            "\nHay resultados sin verificar: requieren revisión o "
+            "--regenerate-unverified."
         )
         return 4
 
