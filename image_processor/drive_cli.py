@@ -23,7 +23,9 @@ Códigos de salida:
 2  Argumentos o carpetas inválidos.
 3  Autorización ausente, expirada, revocada o insuficiente.
 4  Sin permiso, inexistente o no es una carpeta.
-5  Error de red o límite de solicitudes después de los reintentos.
+5  Error de red o límite de frecuencia de solicitudes después de los
+   reintentos, cuota de la API agotada (sin reintentos) o conexión
+   segura (TLS) fallida.
 6  download: alguna imagen no se pudo descargar o verificar, o su
    registro quedó pendiente.
    process-local: lote parcial (imágenes rechazadas o fallidas, o

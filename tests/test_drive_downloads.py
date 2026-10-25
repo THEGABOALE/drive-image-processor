@@ -15,6 +15,7 @@ from PIL import Image
 from drive_fakes import FakeDrive, folder, http_error
 from image_processor import batch, drive_cli
 from image_processor.google_drive import auth, client, downloads
+from image_processor.google_drive.errors import DriveQuotaError
 
 
 FOLDER = "carpetaPrueba"
@@ -1114,3 +1115,77 @@ def test_endless_tiny_progress_is_bounded(download, sleeps):
     assert "sin progreso" in summary.items[0].reason or "demasiados" in summary.items[0].reason
     assert len(drive.media_requests) < len(data)
     assert finals(download.output) == []
+
+
+# --- Revisión GD-03B: cuota agotada durante la descarga ------------------
+
+QUOTA_REASONS = ["dailyLimitExceeded", "quotaExceeded"]
+
+
+def quota_response(reason):
+    """Respuesta HTTP 403 real: MediaIoBaseDownload lanza el HttpError."""
+
+    error = http_error(403, [reason])
+    return error.resp, error.content
+
+
+def two_images():
+    return make_drive(
+        (media_item("q1", "a.jpg", JPEG), JPEG),
+        (media_item("q2", "b.png", PNG, "image/png"), PNG),
+    )
+
+
+@pytest.mark.parametrize("reason", QUOTA_REASONS)
+def test_quota_exhausted_while_downloading_stops_the_batch(download, sleeps, reason):
+    drive = two_images()
+    drive.media_failures = [quota_response(reason)]
+
+    summary = download(drive)
+
+    assert isinstance(summary.aborted, DriveQuotaError)
+    assert reason in str(summary.aborted)
+    # Un solo pedido, sin reintentos ni la imagen siguiente.
+    assert [file_id for file_id, _ in drive.media_requests] == ["q1"]
+    assert sleeps == []
+    assert all(kwargs.get("fileId") != "q2" for _, kwargs in drive.calls)
+    # No es un fallo parcial: el lote se interrumpió.
+    assert summary.count(downloads.FAILED) == 0
+    assert summary.count(downloads.DOWNLOADED) == 0
+    assert finals(download.output) == []
+    assert_clean(download.output)
+
+
+@pytest.mark.parametrize("reason", QUOTA_REASONS)
+def test_quota_exhausted_on_file_metadata_stops_the_batch(download, sleeps, reason):
+    drive = two_images()
+    # Responden files.get de la carpeta y files.list; el files.get del
+    # primer archivo agota la cuota.
+    drive.failures = [None, None, http_error(403, [reason])]
+
+    summary = download(drive)
+
+    assert isinstance(summary.aborted, DriveQuotaError)
+    assert len(drive.executions) == 3
+    assert drive.media_requests == []
+    assert sleeps == []
+    assert summary.count(downloads.FAILED) == 0
+    assert finals(download.output) == []
+
+
+@pytest.mark.parametrize("reason", QUOTA_REASONS)
+def test_cli_quota_exhausted_during_download_exits_with_5(cli, capsys, reason):
+    cli.drive.media_failures = [quota_response(reason)]
+
+    assert cli() == 5
+
+    captured = capsys.readouterr()
+    assert "cuota" in captured.err
+    assert "denegó el acceso" not in captured.err
+    assert "permiso" not in captured.err
+    assert "fallos de red" not in captured.err
+    assert "Fallidas (no publicadas):   0" in captured.out
+    # Lote de dos imágenes: la segunda (roto.jpg) no se intentó.
+    assert [file_id for file_id, _ in cli.drive.media_requests] == ["a1"]
+    assert finals(cli.output) == []
+    assert_clean(cli.output)

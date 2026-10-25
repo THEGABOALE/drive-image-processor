@@ -69,6 +69,7 @@ from . import client, queries
 from .errors import (
     DriveAuthError,
     DriveError,
+    DriveQuotaError,
     DriveTransientError,
 )
 
@@ -875,7 +876,9 @@ def download_folder(
             item = DownloadItem(
                 image.id, image.name, FAILED, reason=_local_error_message(exc)
             )
-        except DriveAuthError as exc:
+        except (DriveAuthError, DriveQuotaError) as exc:
+            # Autorización o cuota agotada: afectan a todo el lote. No es
+            # un fallo de la imagen ni de la red; nada quedó publicado.
             summary.aborted = exc
             break
         except DriveError as exc:

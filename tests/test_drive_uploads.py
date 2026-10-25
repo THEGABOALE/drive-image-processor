@@ -1412,3 +1412,50 @@ def test_rate_limit_403_is_still_retried(reason):
 
     assert translated.retryable is True
     assert not isinstance(translated.error, DriveAccessError)
+
+
+# Revisión GD-03B: cuota agotada al confirmar una subida --------------------
+
+@pytest.mark.parametrize("reason", ["dailyLimitExceeded", "quotaExceeded"])
+def test_quota_on_upload_verification_stops_the_batch(world, monkeypatch, reason):
+    for index in range(2):
+        world.add(f"1CuotaVer{index}", f"foto{index}.jpg")
+    world.prepare()
+    real_create = world.server.create
+
+    def create_then_exhaust_quota(kwargs):
+        item = real_create(kwargs)
+        # La consulta posterior al PNG creado agota la cuota.
+        world.server.write.failures = [http_error(403, [reason])]
+        return item
+
+    monkeypatch.setattr(world.server, "create", create_then_exhaust_quota)
+
+    summary = world.upload(limit=2)
+
+    assert isinstance(summary.aborted, DriveQuotaError)
+    assert summary.count(uploads.UNCERTAIN) == 0
+    assert len(world.server.created) == 1
+    # El primer PNG queda recuperable con su ID reservado.
+    assert world.ledger("1CuotaVer0")["status"] == "pending"
+
+
+@pytest.mark.parametrize("reason", ["dailyLimitExceeded", "quotaExceeded"])
+def test_quota_after_an_ambiguous_upload_stops_the_batch(world, monkeypatch, reason):
+    for index in range(2):
+        world.add(f"1CuotaAmb{index}", f"foto{index}.jpg")
+    world.prepare()
+
+    def lost_response(ctx, body, data):
+        # La respuesta se pierde y la consulta del ID agota la cuota.
+        world.server.write.failures = [http_error(403, [reason])]
+        raise uploads.DriveTransientError("se perdió la respuesta")
+
+    monkeypatch.setattr(uploads, "_send", lost_response)
+
+    summary = world.upload(limit=2)
+
+    assert isinstance(summary.aborted, DriveQuotaError)
+    assert summary.count(uploads.UNCERTAIN) == 0
+    assert [item.file_id for item in summary.items] == ["1CuotaAmb0"]
+    assert world.ledger("1CuotaAmb0")["status"] == "pending"

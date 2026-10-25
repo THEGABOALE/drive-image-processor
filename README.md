@@ -263,10 +263,15 @@ estaba.
 Códigos de salida: 0 correcto, 1 error inesperado de Drive, 2
 argumentos inválidos, 3 autorización ausente, expirada, revocada o
 insuficiente, 4 sin permiso, inexistente o no es una carpeta, 5 error
-de red o límite de solicitudes después de los reintentos.
+de red o límite de solicitudes después de los reintentos, o cuota de la
+API agotada.
 
-Los errores 429, 5xx, de cuota y de red se reintentan hasta 5 veces con
+Los errores 429, 5xx, de límite de frecuencia (403 `rateLimitExceeded`
+o `userRateLimitExceeded`) y de red se reintentan hasta 5 veces con
 espera exponencial (1, 2, 4 y 8 segundos, o la indicada por Google).
+Una cuota agotada (403 `dailyLimitExceeded` o `quotaExceeded`) no se
+reintenta: detiene el comando con el código 5 y nunca se informa como
+falta de permiso.
 Los errores de autorización y de permisos no se reintentan. La
 verificación SSL nunca se desactiva: un certificado inválido o una
 negociación TLS fallida no se reintentan, aunque lleguen envueltos por
@@ -345,9 +350,11 @@ verificadas, se recuperan las publicadas cuyo registro quedó pendiente
 (si su SHA-256 coincide) y se vuelve a descargar el resto. Los
 temporales abandonados se eliminan después de 24 horas.
 
-Cada bloque se reintenta ante errores 429, 5xx o de red, con un máximo
-de 4 reintentos por imagen. Un error de autorización detiene el lote;
-uno de permisos o de certificado SSL no se reintenta.
+Cada bloque se reintenta ante errores 429, 5xx, de límite de frecuencia
+o de red, con un máximo de 4 reintentos por imagen. Un error de
+autorización o una cuota agotada detienen el lote de inmediato (códigos
+3 y 5), sin publicar la imagen en curso; uno de permisos o de
+certificado SSL no se reintenta.
 
 No se admiten descargas concurrentes sobre la misma carpeta local.
 

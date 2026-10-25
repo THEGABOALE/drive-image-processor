@@ -43,11 +43,20 @@ class DriveNotAFolderError(DriveError):
 
 
 class DriveTransientError(DriveError):
-    """Error temporal que persistió después de los reintentos."""
+    """
+    Error temporal: de red, de límite de frecuencia o de cuota agotada.
+    Los reintentables persistieron después de los reintentos; la cuota
+    agotada (DriveQuotaError) y la conexión segura fallida
+    (DriveSecureConnectionError) no se reintentan y detienen el lote.
+    """
 
 
 class DriveRateLimitError(DriveTransientError):
-    """Google limitó las solicitudes (429 o 403 por cuota)."""
+    """
+    Límite de frecuencia de solicitudes (429, o 403 con
+    rateLimitExceeded o userRateLimitExceeded) que persistió después de
+    los reintentos. No es una cuota agotada (DriveQuotaError).
+    """
 
 
 class DriveQuotaError(DriveTransientError):

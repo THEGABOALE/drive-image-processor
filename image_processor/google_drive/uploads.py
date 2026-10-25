@@ -145,8 +145,10 @@ REMOTE_FIELDS = (
 
 _ORIGINAL_FIELDS = "id, parents, md5Checksum, trashed"
 
-# Un 403 con estos motivos es de cuota o de límites, no de permisos:
-# nunca se presenta como falta de acceso a la carpeta.
+# Un 403 con estos motivos es de almacenamiento, cuota o límites de
+# frecuencia, no de permisos: nunca se presenta como falta de acceso a
+# la carpeta. (client ya clasifica las cuotas agotadas como
+# DriveQuotaError y los límites como DriveRateLimitError.)
 _QUOTA_REASONS = frozenset({
     "dailyLimitExceeded",
     "quotaExceeded",
@@ -881,11 +883,16 @@ def _create_and_verify(ctx, candidate, data, expected, remote_id, name, path) ->
         try:
             if _get_own(ctx, remote_id) is None:
                 return UploadItem(status=UNCERTAIN, reason=f"{exc} {uncertain}", **item)
+        except DriveQuotaError:
+            # Cuota agotada: detiene el lote (el registro sigue pendiente).
+            raise
         except DriveTransientError:
             return UploadItem(status=UNCERTAIN, reason=f"{exc} {uncertain}", **item)
 
     try:
         remote = _get_own(ctx, remote_id)
+    except DriveQuotaError:
+        raise
     except DriveTransientError as exc:
         return UploadItem(status=UNCERTAIN, reason=f"{exc} {uncertain}", **item)
 
