@@ -212,7 +212,7 @@ local no depende de esta integración.
    `https://www.googleapis.com/auth/drive.readonly`.
 5. En **Clientes**, cree un cliente OAuth de tipo **Aplicación de
    escritorio** y descargue su JSON.
-6. Guárdelo como `.secrets/client_secret.json` en la carpeta desde la
+6. Guárdelo como `.secrets/credentials.json` en la carpeta desde la
    que ejecutará los comandos. `.secrets/` está excluida de Git.
 
 La carpeta de secretos puede cambiarse con `--secrets-dir` o con la
@@ -247,6 +247,13 @@ python -m image_processor.drive_cli logout
 Los comandos de consulta nunca abren el navegador: si no hay una
 autorización válida, indican que se ejecute `auth`.
 
+Si `token.json` está dañado, los comandos de consulta lo rechazan y
+`auth` inicia una nueva autorización. Solo si esta se completa, el
+archivo dañado se conserva sin cambios en la misma carpeta privada
+como `token.damaged-<fecha>-<aleatorio>.json` y se guarda el token
+nuevo. Si la autorización se cancela, el archivo dañado queda como
+estaba.
+
 Códigos de salida: 0 correcto, 1 error inesperado de Drive, 2
 argumentos inválidos, 3 autorización ausente, expirada, revocada o
 insuficiente, 4 sin permiso, inexistente o no es una carpeta, 5 error
@@ -256,6 +263,12 @@ Los errores 429, 5xx, de cuota y de red se reintentan hasta 5 veces con
 espera exponencial (1, 2, 4 y 8 segundos, o la indicada por Google).
 Los errores de autorización y de permisos no se reintentan. La
 verificación SSL nunca se desactiva.
+
+Durante la autorización en el navegador (`auth`), los errores de
+conexión, de tiempo de espera o de certificado SSL al intercambiar el
+código por los tokens se informan con un mensaje claro (código 5). El
+flujo interactivo no se reintenta automáticamente: basta con volver a
+ejecutar `auth`.
 
 ### Permisos y riesgos
 

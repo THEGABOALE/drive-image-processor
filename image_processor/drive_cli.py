@@ -34,7 +34,14 @@ from .google_drive.errors import (
 
 def _connect(secrets_dir, interactive=False):
     paths = auth.secret_paths(secrets_dir)
-    credentials = auth.get_credentials(paths, interactive=interactive)
+    notices = []
+    credentials = auth.get_credentials(
+        paths, interactive=interactive, notices=notices
+    )
+
+    for notice in notices:
+        print(f"[AVISO] {notice}")
+
     return paths, client.build_service(credentials)
 
 
@@ -145,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help=(
-            "Carpeta privada con client_secret.json y token.json "
+            "Carpeta privada con credentials.json y token.json "
             f"(por defecto, ${auth.SECRETS_DIR_ENV} o .secrets)"
         ),
     )

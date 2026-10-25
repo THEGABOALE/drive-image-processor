@@ -9,6 +9,7 @@ from functools import partial
 from pathlib import Path
 
 import pytest
+import requests
 from google.oauth2.credentials import Credentials
 
 from drive_fakes import ALLOWED, FakeDrive, folder, http_error, image
@@ -245,8 +246,11 @@ def test_secret_files_are_ignored_by_git():
 
     secret_paths = [
         ".secrets/token.json",
+        ".secrets/credentials.json",
         ".secrets/client_secret.json",
         ".secrets/.token.json.abc12345.tmp",
+        ".secrets/token.damaged-20261024T120000Z-abcd1234.json",
+        "otra_carpeta/token.damaged-20261024T120000Z-abcd1234.json",
         "client_secret_123-abc.apps.googleusercontent.com.json",
         "credentials.json",
         "token.json",
@@ -273,3 +277,82 @@ def test_secret_files_are_ignored_by_git():
     ).stdout.splitlines()
 
     assert [path for path in tracked if re.search(r"secret|token|credential", path, re.I) and path.endswith(".json")] == []
+
+
+# --- Revisión GD-01: comando auth ----------------------------------------
+
+class LoginFlow:
+    def __init__(self, credentials=None, error=None):
+        self.credentials = credentials
+        self.error = error
+
+    def run_local_server(self, **kwargs):
+        if self.error is not None:
+            raise self.error
+        return self.credentials
+
+
+def login_credentials():
+    return Credentials(
+        token=ACCESS,
+        refresh_token=REFRESH,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id="cliente.apps.googleusercontent.com",
+        client_secret=CLIENT_SECRET,
+        scopes=[auth.READONLY_SCOPE],
+        expiry=datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1),
+    )
+
+
+def use_login_flow(monkeypatch, flow):
+    real = auth.get_credentials
+    monkeypatch.setattr(
+        auth,
+        "get_credentials",
+        partial(real, flow_factory=lambda path, scopes: flow),
+    )
+
+
+def prepare_damaged_login(drive, tmp_path):
+    paths = auth.secret_paths(tmp_path / ".secrets")
+    damaged = f'{{"refresh_token": "{REFRESH}"'.encode("utf-8")
+    paths.token.write_bytes(damaged)
+    paths.client_secret.write_text("{}", encoding="utf-8")
+    return paths, damaged
+
+
+def test_auth_recovers_from_damaged_token(drive, tmp_path, monkeypatch, capsys):
+    paths, damaged = prepare_damaged_login(drive, tmp_path)
+    use_login_flow(monkeypatch, LoginFlow(login_credentials()))
+
+    # Las consultas siguen rechazando el token dañado.
+    assert run("list-folders") == 3
+
+    assert run("auth") == 0
+
+    captured = capsys.readouterr()
+    [backup] = sorted(paths.directory.glob("token.damaged-*.json"))
+
+    assert backup.read_bytes() == damaged
+    assert f"[AVISO] El token anterior estaba dañado; se conservó sin cambios como {backup.name}" in captured.out
+    assert "Conexión verificada" in captured.out
+    assert run("list-folders") == 0
+
+    for secret in (ACCESS, REFRESH, CLIENT_SECRET):
+        assert secret not in captured.out + captured.err
+
+
+def test_auth_network_error_has_no_traceback(drive, tmp_path, monkeypatch, capsys):
+    paths, damaged = prepare_damaged_login(drive, tmp_path)
+    use_login_flow(
+        monkeypatch,
+        LoginFlow(error=requests.exceptions.SSLError(f"CERTIFICATE_VERIFY_FAILED {ACCESS}")),
+    )
+
+    assert run("auth") == 5
+
+    err = capsys.readouterr().err
+    assert "certificado SSL" in err
+    assert "Traceback" not in err
+    assert ACCESS not in err
+    assert paths.token.read_bytes() == damaged
