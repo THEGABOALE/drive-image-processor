@@ -502,10 +502,11 @@ previamente, las rechazadas, las fallidas y las pendientes (inciertas).
 Códigos de salida: 0 completo; 2 argumentos inválidos; 3 autorización
 de lectura o de escritura ausente, expirada o revocada; 4 sin permiso,
 destino inexistente o sin acceso para `drive.file`, o almacenamiento
-lleno; 5 red, cuota o certificado SSL; 6 lote parcial (rechazadas,
-fallidas o inciertas); 8 manifiesto de resultados dañado. Un error de
-autorización, de permisos o de certificado detiene el lote; tres fallos
-de red seguidos, también.
+lleno; 5 red, límite de solicitudes, cuota agotada o certificado SSL;
+6 lote parcial (rechazadas, fallidas o inciertas); 8 manifiesto de
+resultados dañado. Un error de autorización, de permisos, de cuota
+agotada o de certificado detiene el lote; tres fallos de red seguidos,
+también. Una cuota agotada nunca se informa como falta de permiso.
 
 No se admiten subidas concurrentes sobre la misma carpeta de resultados.
 

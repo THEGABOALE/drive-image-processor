@@ -30,6 +30,7 @@ from image_processor.google_drive.errors import (
     DriveAccessError,
     DriveAuthError,
     DriveCertificateError,
+    DriveQuotaError,
     DriveWriteAccessError,
 )
 from image_processor.manifest import MANIFEST_NAME, Manifest, ManifestError
@@ -1274,7 +1275,11 @@ def test_quota_403_is_not_reported_as_missing_permission(world, reason, dry_run)
     world.prepare()
     forbid_access_check(world, reason)
 
-    with pytest.raises(DriveAccessError) as raised:
+    # Cuota agotada: DriveQuotaError (código 5); almacenamiento lleno:
+    # DriveAccessError con su propio mensaje (código 4).
+    expected = DriveAccessError if reason == "storageQuotaExceeded" else DriveQuotaError
+
+    with pytest.raises(expected) as raised:
         world.upload(dry_run=dry_run)
 
     assert not isinstance(raised.value, DriveWriteAccessError)
@@ -1314,3 +1319,96 @@ def test_cli_403_in_dry_run_and_real_upload(cli_world, capsys):
     assert upload_cli(cli_world) == 4
     assert "403" in capsys.readouterr().err
     assert cli_world.server.generated == [] and cli_world.server.created == []
+
+
+# GD03B-R4: códigos de salida de los 403 en la CLI --------------------------
+#
+# README: 4 = sin permiso o almacenamiento lleno; 5 = red, cuota o
+# certificado. Una cuota nunca se presenta como falta de permiso.
+
+EXIT_403 = [
+    # (motivo, vista previa, código, texto esperado en stderr o stdout)
+    ("insufficientFilePermissions", False, 4, "no tiene permiso"),
+    ("insufficientFilePermissions", True, 0, "sin acceso"),
+    ("dailyLimitExceeded", False, 5, "cuota"),
+    ("dailyLimitExceeded", True, 5, "cuota"),
+    ("quotaExceeded", False, 5, "cuota"),
+    ("quotaExceeded", True, 5, "cuota"),
+    ("storageQuotaExceeded", False, 4, "almacenamiento"),
+    ("storageQuotaExceeded", True, 4, "almacenamiento"),
+    ("rateLimitExceeded", False, 5, "limitó las solicitudes"),
+    ("rateLimitExceeded", True, 5, "limitó las solicitudes"),
+    ("userRateLimitExceeded", False, 5, "limitó las solicitudes"),
+    ("userRateLimitExceeded", True, 5, "limitó las solicitudes"),
+]
+
+RATE_LIMITS = {"rateLimitExceeded", "userRateLimitExceeded"}
+
+
+@pytest.mark.parametrize("reason, dry_run, code, text", EXIT_403)
+def test_cli_exit_code_for_403_on_the_access_check(cli_world, capsys, reason, dry_run, code, text):
+    cli_world.add("1Codigo403", "producto.jpg")
+    cli_world.prepare()
+    # Los límites de frecuencia se reintentan: fallan todos los intentos.
+    attempts = client.MAX_ATTEMPTS if reason in RATE_LIMITS else 1
+    cli_world.server.write.failures = [http_error(403, [reason])] * attempts
+
+    extra = ["--dry-run"] if dry_run else []
+    assert upload_cli(cli_world, *extra) == code
+
+    out, err = capsys.readouterr()
+    assert text in out + err
+    if reason != "insufficientFilePermissions":
+        # Una cuota o un límite nunca se presenta como falta de permiso.
+        assert "no tiene permiso" not in out + err
+        assert "sin acceso" not in out + err
+
+    # Todo se detiene antes de preasignar IDs o crear archivos.
+    assert not {"files.generateIds", "files.create"} & set(write_calls(cli_world))
+    assert cli_world.server.generated == [] and cli_world.server.created == []
+    assert not (cli_world.outputs / uploads.LEDGER_DIR).exists()
+
+
+@pytest.mark.parametrize(
+    "reason, code, text",
+    [
+        ("insufficientFilePermissions", 4, "403"),
+        ("dailyLimitExceeded", 5, "cuota"),
+        ("quotaExceeded", 5, "cuota"),
+        ("storageQuotaExceeded", 4, "almacenamiento"),
+    ],
+)
+def test_cli_exit_code_for_403_on_create_stops_the_batch(cli_world, capsys, reason, code, text):
+    for index in range(2):
+        cli_world.add(f"1Crear403{index}", f"foto{index}.jpg")
+    cli_world.prepare()
+    cli_world.server.write.upload_failures = [http_error(403, [reason])]
+
+    assert upload_cli(cli_world, limit="2") == code
+
+    _, err = capsys.readouterr()
+    assert text in err
+    if reason != "insufficientFilePermissions":
+        assert "denegó el acceso" not in err
+    # Se detiene en el primer PNG: un solo intento y nada creado.
+    assert len(cli_world.server.write.upload_attempts) == 1
+    assert cli_world.server.created == []
+    assert cli_world.sleeps == []
+
+
+@pytest.mark.parametrize("reason", ["dailyLimitExceeded", "quotaExceeded"])
+def test_quota_403_is_classified_as_quota(reason):
+    translated = client.translate_error(http_error(403, [reason]))
+
+    assert isinstance(translated.error, DriveQuotaError)
+    assert not isinstance(translated.error, DriveAccessError)
+    assert translated.retryable is False
+    assert reason in translated.error.reasons
+
+
+@pytest.mark.parametrize("reason", ["rateLimitExceeded", "userRateLimitExceeded"])
+def test_rate_limit_403_is_still_retried(reason):
+    translated = client.translate_error(http_error(403, [reason]))
+
+    assert translated.retryable is True
+    assert not isinstance(translated.error, DriveAccessError)

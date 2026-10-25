@@ -98,6 +98,7 @@ from .errors import (
     DriveCertificateError,
     DriveError,
     DriveNotFoundError,
+    DriveQuotaError,
     DriveResponseError,
     DriveSecureConnectionError,
     DriveTransientError,
@@ -872,7 +873,8 @@ def _create_and_verify(ctx, candidate, data, expected, remote_id, name, path) ->
         _send(ctx, body, data)
     except _AlreadyCreated:
         pass
-    except DriveSecureConnectionError:
+    except (DriveSecureConnectionError, DriveQuotaError):
+        # Google rechazó la solicitud: no es una respuesta ambigua.
         raise
     except DriveTransientError as exc:
         # Respuesta ambigua: ¿llegó a Drive? Se consulta el ID reservado.
@@ -1191,7 +1193,9 @@ def upload_results(
                 reason=f"error local ({type(exc).__name__}); no se subió el PNG.",
                 **base,
             )
-        except (DriveAuthError, DriveAccessError, DriveSecureConnectionError) as exc:
+        except (
+            DriveAuthError, DriveAccessError, DriveSecureConnectionError, DriveQuotaError,
+        ) as exc:
             # Afectan a todo el lote: se detiene.
             report(UploadItem(status=FAILED, reason=str(exc), **base))
             summary.aborted = exc

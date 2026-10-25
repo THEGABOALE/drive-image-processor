@@ -6,9 +6,11 @@ execute() clasifica las respuestas:
 - 401 o credenciales revocadas: DriveAuthError, sin reintentos.
 - 403 por permisos: DriveAccessError, sin reintentos.
 - 404: DriveNotFoundError.
-- 429, 403 por cuota y 5xx: reintentos acotados con espera
-  exponencial (o la indicada por Retry-After); luego
+- 429, 403 por límite de frecuencia y 5xx: reintentos acotados con
+  espera exponencial (o la indicada por Retry-After); luego
   DriveRateLimitError o DriveTransientError.
+- 403 por cuota agotada (dailyLimitExceeded, quotaExceeded):
+  DriveQuotaError, sin reintentos. No es un error de permisos.
 - Fallos de red: los mismos reintentos; luego DriveNetworkError.
 - TLS: un certificado inválido (DriveCertificateError) o una
   negociación TLS fallida (DriveSecureConnectionError) no se
@@ -38,6 +40,7 @@ from .errors import (
     DriveError,
     DriveNetworkError,
     DriveNotFoundError,
+    DriveQuotaError,
     DriveRateLimitError,
     DriveSecureConnectionError,
     DriveTransientError,
@@ -52,6 +55,9 @@ MAX_DELAY_SECONDS = 32.0
 
 TRANSIENT_STATUSES = {429, 500, 502, 503, 504}
 RATE_LIMIT_REASONS = {"rateLimitExceeded", "userRateLimitExceeded"}
+
+# Cuotas agotadas: reintentar enseguida no sirve.
+QUOTA_REASONS = {"dailyLimitExceeded", "quotaExceeded"}
 
 # Cortes de una conexión TLS ya establecida: temporales.
 _TRANSIENT_TLS_ERRORS = (
@@ -197,6 +203,15 @@ def translate_error(exc: BaseException) -> TranslatedError | None:
         rate_limited = status == 429 or (
             status == 403 and bool(reasons & RATE_LIMIT_REASONS)
         )
+
+        if status == 403 and reasons & QUOTA_REASONS:
+            error = DriveQuotaError(
+                "Se agotó la cuota de la API de Google Drive "
+                f"(403: {', '.join(sorted(reasons & QUOTA_REASONS))}). "
+                "Inténtelo de nuevo más tarde."
+            )
+            error.reasons = frozenset(reasons)
+            return TranslatedError(error, retryable=False)
 
         if status == 401:
             return TranslatedError(

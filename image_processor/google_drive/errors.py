@@ -50,6 +50,14 @@ class DriveRateLimitError(DriveTransientError):
     """Google limitó las solicitudes (429 o 403 por cuota)."""
 
 
+class DriveQuotaError(DriveTransientError):
+    """
+    Se agotó una cuota de la API (403 dailyLimitExceeded o
+    quotaExceeded). No es un problema de permisos y no se reintenta
+    enseguida: se resuelve más tarde.
+    """
+
+
 class DriveNetworkError(DriveTransientError):
     """No se pudo comunicar con Google."""
 
