@@ -1220,3 +1220,97 @@ def test_cli_dry_run_never_modifies_the_tokens(cli_world, monkeypatch):
 
     assert upload_cli(cli_world, "--dry-run") == 0
     assert (cli_world.paths.token.read_bytes(), cli_world.paths.write_token.read_bytes()) == before
+
+
+# GD03B-R4: HTTP 403 al comprobar el acceso de escritura --------------------
+
+PERMISSION_403 = ["insufficientFilePermissions", "forbidden", "insufficientPermissions"]
+
+
+def forbid_access_check(world, reason):
+    # La primera llamada de la credencial de escritura es la comprobación
+    # de acceso a la carpeta de destino.
+    world.server.write.failures = [http_error(403, [reason])]
+
+
+@pytest.mark.parametrize("reason", PERMISSION_403)
+def test_dry_run_continues_when_the_access_check_returns_403(world, reason):
+    world.add("1Vista403", "producto.jpg")
+    world.prepare()
+    forbid_access_check(world, reason)
+
+    summary = world.upload(dry_run=True)
+
+    assert [item.status for item in summary.items] == [uploads.PLANNED]
+    assert summary.items[0].remote_name == "TRANSFORMADA_producto.png"
+    assert summary.write_access is False
+    assert "403" in summary.write_access_note
+    assert "se detendría" in summary.write_access_note
+    # Solo la comprobación usó la credencial de escritura; el resto, la
+    # de lectura. Ninguna escritura, ni remota ni local.
+    assert write_calls(world) == ["files.get"]
+    assert world.server.generated == [] and world.server.created == []
+    assert not (world.outputs / uploads.LEDGER_DIR).exists()
+
+
+@pytest.mark.parametrize("reason", PERMISSION_403)
+def test_real_upload_stops_on_403_before_any_creation(world, reason):
+    world.add("1Real403", "producto.jpg")
+    world.prepare()
+    forbid_access_check(world, reason)
+
+    with pytest.raises(DriveWriteAccessError, match="403"):
+        world.upload()
+
+    assert not {"files.generateIds", "files.create"} & set(write_calls(world))
+    assert world.server.generated == [] and world.server.created == []
+    assert not (world.outputs / uploads.LEDGER_DIR).exists()
+
+
+@pytest.mark.parametrize("reason", ["dailyLimitExceeded", "quotaExceeded", "storageQuotaExceeded"])
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_quota_403_is_not_reported_as_missing_permission(world, reason, dry_run):
+    world.add("1Cuota403", "producto.jpg")
+    world.prepare()
+    forbid_access_check(world, reason)
+
+    with pytest.raises(DriveAccessError) as raised:
+        world.upload(dry_run=dry_run)
+
+    assert not isinstance(raised.value, DriveWriteAccessError)
+    assert reason in str(raised.value) or "almacenamiento" in str(raised.value)
+    assert world.server.generated == [] and world.server.created == []
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_transient_and_certificate_errors_are_not_hidden_as_permissions(world, dry_run):
+    world.add("1Transitorio", "producto.jpg")
+    world.prepare()
+    world.server.write.failures = [http_error(503)] * client.MAX_ATTEMPTS
+
+    with pytest.raises(uploads.DriveTransientError) as raised:
+        world.upload(dry_run=dry_run)
+
+    assert not isinstance(raised.value, DriveAccessError)
+
+    world.server.write.failures = [ssl.SSLCertVerificationError("certificado")]
+
+    with pytest.raises(DriveCertificateError):
+        world.upload(dry_run=dry_run)
+
+    assert world.server.generated == [] and world.server.created == []
+
+
+def test_cli_403_in_dry_run_and_real_upload(cli_world, capsys):
+    cli_world.add("1Cli403", "producto.jpg")
+    cli_world.prepare()
+
+    forbid_access_check(cli_world, "insufficientFilePermissions")
+    assert upload_cli(cli_world, "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "sin acceso" in out and "se detendría" in out
+
+    forbid_access_check(cli_world, "insufficientFilePermissions")
+    assert upload_cli(cli_world) == 4
+    assert "403" in capsys.readouterr().err
+    assert cli_world.server.generated == [] and cli_world.server.created == []

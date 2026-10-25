@@ -144,6 +144,16 @@ REMOTE_FIELDS = (
 
 _ORIGINAL_FIELDS = "id, parents, md5Checksum, trashed"
 
+# Un 403 con estos motivos es de cuota o de límites, no de permisos:
+# nunca se presenta como falta de acceso a la carpeta.
+_QUOTA_REASONS = frozenset({
+    "dailyLimitExceeded",
+    "quotaExceeded",
+    "storageQuotaExceeded",
+    "rateLimitExceeded",
+    "userRateLimitExceeded",
+})
+
 _HEX32 = re.compile(r"[0-9a-f]{32}")
 _VERSION = re.compile(r"[0-9]+")
 
@@ -563,11 +573,13 @@ def _write_error(error: DriveError) -> DriveError:
     if isinstance(error, DriveAuthError):
         return DriveAuthError(_WRITE_AUTH_MESSAGE)
 
-    if isinstance(error, DriveAccessError) and "storageQuotaExceeded" in str(error):
-        return DriveAccessError(
+    if isinstance(error, DriveAccessError) and "storageQuotaExceeded" in error.reasons:
+        full = DriveAccessError(
             "El almacenamiento de Google Drive de la cuenta está lleno "
             "(403: storageQuotaExceeded). No se subió el PNG."
         )
+        full.reasons = error.reasons
+        return full
 
     return error
 
@@ -639,6 +651,18 @@ def _check_write_access(ctx: _Context) -> None:
         ))
     except DriveNotFoundError:
         item = None
+    except DriveAccessError as exc:
+        if exc.reasons & _QUOTA_REASONS:
+            raise
+
+        # 403 de permisos: la autorización no puede escribir en la carpeta.
+        detail = f": {', '.join(sorted(exc.reasons))}" if exc.reasons else ""
+        raise DriveWriteAccessError(
+            f"La autorización de escritura (drive.file) no tiene permiso "
+            f"sobre la carpeta de destino {target.name} ({target.id}) "
+            f"(403{detail}). No se subió nada y no se solicita el permiso "
+            "'drive'."
+        ) from None
 
     if item is None or item.get("trashed"):
         raise DriveWriteAccessError(

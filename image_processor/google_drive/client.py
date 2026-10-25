@@ -224,6 +224,7 @@ def translate_error(exc: BaseException) -> TranslatedError | None:
                     f"Google Drive respondió con un error ({status}{detail})."
                 )
 
+            error.reasons = frozenset(reasons)
             return TranslatedError(error, retryable=False)
 
         if rate_limited:
@@ -236,6 +237,7 @@ def translate_error(exc: BaseException) -> TranslatedError | None:
                 f"Google Drive no está disponible temporalmente ({status})."
             )
 
+        error.reasons = frozenset(reasons)
         return TranslatedError(error, retryable=True, retry_after=_retry_after(exc))
 
     if isinstance(exc, RefreshError):

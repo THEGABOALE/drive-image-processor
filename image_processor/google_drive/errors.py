@@ -7,7 +7,13 @@ las respuestas de Google.
 
 
 class DriveError(RuntimeError):
-    """Error general de Google Drive."""
+    """
+    Error general de Google Drive. reasons son los motivos que informó
+    la API (por ejemplo, "insufficientFilePermissions" o
+    "storageQuotaExceeded"), si los hubo.
+    """
+
+    reasons: frozenset[str] = frozenset()
 
 
 class DriveAuthError(DriveError):
