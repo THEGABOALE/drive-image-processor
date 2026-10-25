@@ -6,6 +6,11 @@ registra la procedencia de cada resultado: el original (contenido
 y ubicación), el modelo, las opciones y la versión del
 procesamiento, junto con el SHA-256 del PNG generado.
 
+Los originales son locales ("local") o descargas de Google Drive
+("drive", GD-03A). Un original local se identifica por su ruta, sin
+distinguir mayúsculas (como los nombres, H-04). Uno de Drive, por su
+fileId exacto: es un identificador opaco y nunca se normaliza.
+
 El manifiesto es el único archivo que la aplicación reemplaza:
 se escribe en un temporal y se sustituye con os.replace(). Las
 imágenes de productos nunca se reemplazan (ver atomic_write).
@@ -42,7 +47,12 @@ PENDING = "pending"
 COMPLETED = "completed"
 STATUSES = (PENDING, COMPLETED)
 
+LOCAL_KIND = "local"
+DRIVE_KIND = "drive"
+
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_MD5 = re.compile(r"[0-9a-f]{32}")
+_FILE_ID = re.compile(r"[A-Za-z0-9_-]+")
 _MANIFEST_TEMP = re.compile(
     re.escape(MANIFEST_NAME) + r"\.[a-z0-9_]{8}" + re.escape(TEMP_SUFFIX)
 )
@@ -59,6 +69,14 @@ _ENTRY_KEYS = {
     "recorded_at",
 }
 _SOURCE_KEYS = {"kind", "id", "name", "size", "sha256"}
+_DRIVE_KEYS = {
+    "folder_id",
+    "md5_checksum",
+    "head_revision_id",
+    "version",
+    "modified_time",
+    "local_name",
+}
 _OPTION_KEYS = {"width", "height", "background"}
 
 
@@ -78,10 +96,21 @@ def file_sha256(path: Path) -> str:
 
 def source_key(source_id: str) -> str:
     """
-    Identificador del original para comparar identidades: sin
-    distinguir mayúsculas y en forma NFC, como los nombres (H-04).
+    Identificador de un original local para comparar identidades:
+    sin distinguir mayúsculas y en forma NFC, como los nombres (H-04).
     """
     return name_key(source_id)
+
+
+def identity_key(kind: str, source_id: str) -> str:
+    """
+    Identificador del original según su procedencia. Un fileId de
+    Drive se compara exacto: "1AbC" y "1abc" son archivos distintos.
+    """
+    if kind == LOCAL_KIND:
+        return source_key(source_id)
+
+    return source_id
 
 
 @dataclass(frozen=True)
@@ -125,10 +154,28 @@ class ResultIdentity:
 
 
 @dataclass(frozen=True)
+class DriveProvenance:
+    """
+    Datos de Drive de un original descargado por GD-02: la carpeta
+    de origen (destino de la futura subida), la revisión descargada
+    y el nombre de la copia local.
+    """
+
+    folder_id: str
+    md5_checksum: str
+    head_revision_id: str | None
+    version: str | None
+    modified_time: str | None
+    local_name: str
+
+
+@dataclass(frozen=True)
 class SourceRecord:
     """
-    Procedencia del original. kind distingue el origen ("local";
-    más adelante, Google Drive) e id lo identifica dentro de él.
+    Procedencia del original. kind distingue el origen ("local" o
+    "drive") e id lo identifica dentro de él: la ruta relativa o el
+    fileId exacto. name es el nombre del original (en Drive, el
+    remoto). drive solo existe, y es obligatorio, para "drive".
     """
 
     kind: str
@@ -136,6 +183,7 @@ class SourceRecord:
     name: str
     size: int
     sha256: str
+    drive: DriveProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -195,6 +243,48 @@ def _is_safe_output_name(name) -> bool:
     )
 
 
+def _is_plain_name(name) -> bool:
+    """Un nombre de archivo sin rutas: no puede salir de su carpeta."""
+
+    return (
+        _is_text(name)
+        and Path(name).name == name
+        and name not in (".", "..")
+        and not any(char in name for char in '/\\:')
+    )
+
+
+def _is_optional_text(value) -> bool:
+    return value is None or _is_text(value)
+
+
+def _parse_drive(raw, where: str) -> DriveProvenance:
+    _require(
+        isinstance(raw, dict) and set(raw) == _DRIVE_KEYS,
+        f"{where}: datos de Drive inválidos",
+    )
+    _require(
+        isinstance(raw["folder_id"], str)
+        and _FILE_ID.fullmatch(raw["folder_id"]) is not None
+        and isinstance(raw["md5_checksum"], str)
+        and _MD5.fullmatch(raw["md5_checksum"]) is not None
+        and _is_optional_text(raw["head_revision_id"])
+        and _is_optional_text(raw["version"])
+        and _is_optional_text(raw["modified_time"])
+        and _is_plain_name(raw["local_name"]),
+        f"{where}: datos de Drive inválidos",
+    )
+
+    return DriveProvenance(
+        folder_id=raw["folder_id"],
+        md5_checksum=raw["md5_checksum"],
+        head_revision_id=raw["head_revision_id"],
+        version=raw["version"],
+        modified_time=raw["modified_time"],
+        local_name=raw["local_name"],
+    )
+
+
 def _parse_entry(raw, index: int) -> ManifestEntry:
     where = f"entrada {index}"
 
@@ -221,8 +311,10 @@ def _parse_entry(raw, index: int) -> ManifestEntry:
     )
 
     source = raw["source"]
+    is_drive = isinstance(source, dict) and source.get("kind") == DRIVE_KIND
     _require(
-        isinstance(source, dict) and set(source) == _SOURCE_KEYS,
+        isinstance(source, dict)
+        and set(source) == (_SOURCE_KEYS | {"drive"} if is_drive else _SOURCE_KEYS),
         f"{where}: source inválido",
     )
     _require(
@@ -235,6 +327,15 @@ def _parse_entry(raw, index: int) -> ManifestEntry:
         and _SHA256.fullmatch(source["sha256"]) is not None,
         f"{where}: datos del original inválidos",
     )
+
+    drive = None
+
+    if is_drive:
+        _require(
+            _FILE_ID.fullmatch(source["id"]) is not None,
+            f"{where}: fileId de Drive inválido",
+        )
+        drive = _parse_drive(source["drive"], where)
 
     options = raw["options"]
     _require(
@@ -262,7 +363,7 @@ def _parse_entry(raw, index: int) -> ManifestEntry:
         status=raw["status"],
         identity=ResultIdentity(
             source_kind=source["kind"],
-            source_key=source_key(source["id"]),
+            source_key=identity_key(source["kind"], source["id"]),
             source_sha256=source["sha256"],
             model=raw["model"],
             width=options["width"],
@@ -276,6 +377,7 @@ def _parse_entry(raw, index: int) -> ManifestEntry:
             name=source["name"],
             size=source["size"],
             sha256=source["sha256"],
+            drive=drive,
         ),
         output_sha256=output_sha256,
         recorded_at=raw["recorded_at"],
@@ -284,18 +386,31 @@ def _parse_entry(raw, index: int) -> ManifestEntry:
 
 def _entry_to_json(entry: ManifestEntry) -> dict:
     identity = entry.identity
+    source = {
+        "kind": entry.source.kind,
+        "id": entry.source.id,
+        "name": entry.source.name,
+        "size": entry.source.size,
+        "sha256": entry.source.sha256,
+    }
+
+    drive = entry.source.drive
+
+    if drive is not None:
+        source["drive"] = {
+            "folder_id": drive.folder_id,
+            "md5_checksum": drive.md5_checksum,
+            "head_revision_id": drive.head_revision_id,
+            "version": drive.version,
+            "modified_time": drive.modified_time,
+            "local_name": drive.local_name,
+        }
 
     return {
         "output_name": entry.output_name,
         "status": entry.status,
         "output_sha256": entry.output_sha256,
-        "source": {
-            "kind": entry.source.kind,
-            "id": entry.source.id,
-            "name": entry.source.name,
-            "size": entry.source.size,
-            "sha256": entry.source.sha256,
-        },
+        "source": source,
         "model": identity.model,
         "options": {
             "width": identity.width,
@@ -352,16 +467,19 @@ class Manifest:
             self._entries[name_key(entry.output_name)] = entry
 
     @classmethod
-    def load(cls, directory: Path) -> "Manifest":
+    def load(cls, directory: Path, clean: bool = True) -> "Manifest":
         """
         Lee y valida el manifiesto. Si no existe, devuelve uno
         vacío. Si está dañado o es de otra versión, lanza
         ManifestError: nunca lo reinicia.
+
+        clean=False no elimina temporales abandonados (solo lectura).
         """
         directory = Path(directory)
         path = directory / MANIFEST_NAME
 
-        _remove_stale_manifest_temps(directory)
+        if clean:
+            _remove_stale_manifest_temps(directory)
 
         if not path.exists():
             return cls(directory)

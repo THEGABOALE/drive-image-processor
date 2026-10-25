@@ -238,6 +238,10 @@ class _Failed(Exception):
     """La descarga o la verificación falló: no se publica nada."""
 
 
+class InvalidRecordError(_Failed):
+    """Un registro de procedencia de .drive/ está dañado o no es válido."""
+
+
 class _LocalWriteError(_Failed):
     """
     Error de E/S del disco local (no de la red): no se reintenta la
@@ -270,7 +274,11 @@ _RECORD_KEYS = {
 }
 
 
-def _read_record(output_dir: Path, name: str) -> dict | None:
+def read_record(output_dir: Path, name: str) -> dict | None:
+    """
+    Registro de procedencia de la imagen local name, o None si no
+    tiene. Un registro dañado lanza InvalidRecordError.
+    """
     path = _record_path(output_dir, name)
 
     if not path.exists():
@@ -295,7 +303,7 @@ def _read_record(output_dir: Path, name: str) -> dict | None:
     )
 
     if not valid:
-        raise _Failed(
+        raise InvalidRecordError(
             f"el registro local {METADATA_DIR}/{name}.json está dañado; "
             "no se modifica ni se sobrescribe la imagen."
         )
@@ -657,7 +665,7 @@ def _process_image(
 
     # 1. ¿Este contenido ya está descargado (o pendiente de registro)?
     for name in (base, revision):
-        record = _read_record(output_dir, name)
+        record = read_record(output_dir, name)
 
         if record is None:
             continue
@@ -697,7 +705,7 @@ def _process_image(
     else:
         # 2. Contenido nuevo: nombre base o, si está ocupado, revisión.
         previous = None
-        base_record = _read_record(output_dir, base)
+        base_record = read_record(output_dir, base)
 
         if base_record is None:
             if exists(base):

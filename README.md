@@ -343,6 +343,62 @@ uno de permisos o de certificado SSL no se reintenta.
 
 No se admiten descargas concurrentes sobre la misma carpeta local.
 
+### Procesamiento de las descargas (GD-03A)
+
+```
+python -m image_processor.drive_cli process-local --folder-id ID --input downloads/prueba --output outputs/prueba --limit 3
+python -m image_processor.drive_cli process-local --folder-id ID --input downloads/prueba --output outputs/prueba --background transparent --width 800 --height 600
+python -m image_processor.drive_cli process-local --folder-id ID --input downloads/prueba --output outputs/prueba --dry-run
+```
+
+Procesa las imágenes ya descargadas con el mismo motor, la misma
+política de nombres y el mismo manifiesto que el lote local. **No se
+conecta a Drive ni lee la autorización**: trabaja solo con archivos
+locales, nunca modifica las descargas ni sus registros y no sube nada.
+Por defecto: fondo blanco, 400 x 400 px, PNG, modelo
+`isnet-general-use`. El modelo se inicializa una sola vez por lote, y
+solo si hay algo que procesar. `--dry-run` muestra qué se haría sin
+inicializar el modelo ni escribir nada.
+
+**Procedencia.** Solo se procesa una imagen con un registro completo de
+GD-02 (`.drive/<nombre>.json`) que pertenece a la carpeta indicada en
+`--folder-id`, nombra ese mismo archivo (su nombre local se deriva del
+`fileId` registrado) y coincide en tamaño, MD5 y SHA-256 con el archivo.
+Se rechazan las imágenes sin registro, con un registro dañado o
+pendiente, y las alteradas; los enlaces simbólicos también. Las
+descargas de otras carpetas se excluyen. Justo antes de procesar, los
+bytes se vuelven a comparar con el SHA-256 registrado, y se procesan
+esos mismos bytes.
+
+**Identidad.** El original es `("drive", fileId)`, con el `fileId`
+exacto: es un identificador opaco y nunca se normaliza (`1AbC` y `1abc`
+son archivos distintos). Los originales locales se siguen comparando
+sin distinguir mayúsculas. Si hay varias revisiones descargadas de un
+mismo `fileId`, se procesa la vigente (mayor versión de Drive); los
+resultados de las anteriores se conservan.
+
+**Nombres.** `TRANSFORMADA_<nombre local>[variante].png`, por ejemplo
+`TRANSFORMADA_producto--1~ab~c-_9.png`. El nombre local ya incluye el
+`fileId` codificado, así que dos archivos remotos con el mismo nombre
+nunca comparten resultado. Se aplican todas las reglas anteriores: las
+variantes, las revisiones `__rev-` cuando el nombre pertenece a otro
+original (por ejemplo, a un resultado del lote local), la publicación
+sin sobrescribir y la recuperación tras una interrupción.
+
+**Manifiesto.** Cada resultado de Drive registra el `fileId`, el nombre
+remoto, el SHA-256 local y, en `source.drive`, la carpeta de origen, el
+MD5 de Drive, la versión, la revisión, la fecha de modificación y el
+nombre de la copia local, además del modelo, las opciones, la versión
+del procesamiento y el SHA-256 del PNG. Un destino guarda resultados de
+una sola carpeta de Drive. La subida (GD-03B) usará esta información
+para saber qué PNG corresponde a cada fotografía y si está verificado.
+
+Códigos de salida: 0 lote completo; 2 argumentos o carpetas inválidos
+(incluida una carpeta dentro de la de secretos); 6 lote parcial
+(imágenes rechazadas o fallidas, o resultados sin verificar o con el
+registro pendiente); 7 no se pudo inicializar el modelo; 8 manifiesto
+dañado o destino con resultados de otra carpeta de Drive.
+
 ### Permisos y riesgos
 
 - `drive.readonly` permite leer **todos** los archivos de la cuenta.

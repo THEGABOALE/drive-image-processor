@@ -8,8 +8,10 @@ from PIL import Image
 
 from .atomic_write import remove_stale_temp_files, save_png_exclusive
 from .background_removal import prepare_model
+from .errors import EmptySegmentationError
 from .manifest import (
     COMPLETED,
+    LOCAL_KIND,
     PENDING,
     Manifest,
     ManifestEntry,
@@ -17,9 +19,9 @@ from .manifest import (
     ResultIdentity,
     SourceRecord,
     file_sha256,
+    identity_key,
     local_source_id,
     now_utc,
-    source_key,
 )
 from .naming import (  # noqa: F401 (se reexportan)
     OUTPUT_PREFIX,
@@ -34,6 +36,26 @@ from .pipeline import PIPELINE_VERSION, process_image
 from .processing import OutputOptions
 
 
+# Estado de cada imagen del lote (ItemResult.status).
+PROCESSED = "processed"
+VERIFIED = "verified"
+RECOVERED = "recovered"
+UNVERIFIED = "unverified"
+FAILED = "failed"
+SEGMENTATION_FAILED = "segmentation_failed"
+PLANNED = "planned"
+
+
+@dataclass(frozen=True)
+class ItemResult:
+    source: Path
+    status: str
+    output_name: str | None = None
+    message: str | None = None
+    # False: el PNG se publicó, pero su registro quedó pendiente.
+    registered: bool = True
+
+
 @dataclass
 class BatchResult:
     processed: int = 0
@@ -46,6 +68,12 @@ class BatchResult:
     recovered: int = 0
     # PNG publicados cuyo registro quedó pendiente de recuperación.
     unregistered: int = 0
+    # Fallos por segmentación vacía (también cuentan en failed).
+    segmentation_failed: int = 0
+    # Vista previa (dry_run): imágenes que se procesarían.
+    planned: int = 0
+    # Detalle por imagen (con rutas): no interviene al comparar lotes.
+    items: list[ItemResult] = field(default_factory=list, compare=False)
 
 
 @dataclass(frozen=True)
@@ -56,6 +84,10 @@ class _Decision:
     warning: str | None = None
     # Pendiente cuyo archivo no coincide con la evidencia registrada.
     unproven: bool = False
+
+
+class SourceChangedError(RuntimeError):
+    """El original cambió después de verificarse: no se procesa."""
 
 
 class _EncodedPNG:
@@ -76,6 +108,51 @@ def _discover_sources(input_dir: Path) -> list[Path]:
         for path in input_dir.iterdir()
         if path.is_file() and is_eligible_source(path)
     ]
+
+
+def _local_record(source: Path, output_dir: Path) -> SourceRecord:
+    return SourceRecord(
+        kind=LOCAL_KIND,
+        id=local_source_id(source, output_dir),
+        name=source.name,
+        size=source.stat().st_size,
+        sha256=file_sha256(source),
+    )
+
+
+def result_identity(
+    record: SourceRecord,
+    model_name: str,
+    options: OutputOptions,
+) -> ResultIdentity:
+    """Identidad del resultado de un original con esta configuración."""
+
+    return ResultIdentity(
+        source_kind=record.kind,
+        source_key=identity_key(record.kind, record.id),
+        source_sha256=record.sha256,
+        model=model_name,
+        width=options.width,
+        height=options.height,
+        background=options.background,
+        pipeline_version=PIPELINE_VERSION,
+    )
+
+
+def _read_verified(source: Path, record: SourceRecord) -> bytes:
+    """
+    Bytes del original, solo si son los que se registraron. Se
+    procesan estos mismos bytes: nunca un archivo cambiado entre la
+    verificación y el procesamiento.
+    """
+    data = source.read_bytes()
+
+    if hashlib.sha256(data).hexdigest() != record.sha256:
+        raise SourceChangedError(
+            "el original cambió después de verificarse; no se procesa."
+        )
+
+    return data
 
 
 def _describe_output(path: Path):
@@ -275,9 +352,6 @@ def process_folder(
     Un manifiesto dañado lanza ManifestError antes de procesar.
     """
 
-    if options is None:
-        options = OutputOptions()
-
     input_dir = Path(input_dir)
 
     if not input_dir.is_dir():
@@ -291,7 +365,47 @@ def process_folder(
         else input_dir
     )
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    return process_sources(
+        _discover_sources(input_dir),
+        output_dir,
+        describe=lambda source: _local_record(source, output_dir),
+        model_name=model_name,
+        options=options,
+        regenerate_unverified=regenerate_unverified,
+    )
+
+
+def process_sources(
+    sources: list[Path],
+    output_dir: Path,
+    describe,
+    model_name: str = "isnet-general-use",
+    options: OutputOptions | None = None,
+    regenerate_unverified: bool = False,
+    dry_run: bool = False,
+    on_item=None,
+) -> BatchResult:
+    """
+    Núcleo del lote, común a todos los orígenes (ver process_folder).
+
+    describe(source) devuelve el SourceRecord del original: su
+    procedencia y el SHA-256 que lo identifica. Los bytes se vuelven
+    a comprobar contra ese SHA-256 justo antes de procesarlos.
+
+    on_item(ItemResult) recibe el estado de cada imagen; sin él, se
+    informa por pantalla como siempre.
+
+    dry_run decide qué se haría sin inicializar el modelo ni
+    escribir nada en el destino (tampoco limpia temporales).
+    """
+
+    if options is None:
+        options = OutputOptions()
+
+    output_dir = Path(output_dir)
+
+    if not dry_run:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     summary = BatchResult()
     pending = []
@@ -299,12 +413,45 @@ def process_folder(
     # Resultados publicados cuyo registro completo no se guardó.
     unsaved: list[str] = []
 
-    # Restos de ejecuciones interrumpidas.
-    summary.temp_removed = remove_stale_temp_files(
-        output_dir, prefix=OUTPUT_PREFIX
-    )
+    def report(source, status, name=None, message=None, echo=None):
+        item = ItemResult(source, status, name, message)
+        summary.items.append(item)
 
-    manifest = Manifest.load(output_dir)
+        if on_item is not None:
+            on_item(item)
+        elif echo is not None:
+            print(echo)
+
+    def fail(source, message, status=FAILED, echo=False):
+        summary.failed += 1
+        summary.errors.append(f"{source.name}: {message}")
+        report(
+            source,
+            status,
+            message=message,
+            echo=f"[ERROR] {source.name}" if echo else None,
+        )
+
+    if dry_run:
+        exists_on_disk = output_dir.is_dir()
+        manifest = (
+            Manifest.load(output_dir, clean=False)
+            if exists_on_disk
+            else Manifest(output_dir)
+        )
+        existing_names = (
+            [path.name for path in output_dir.iterdir()]
+            if exists_on_disk
+            else []
+        )
+    else:
+        # Restos de ejecuciones interrumpidas.
+        summary.temp_removed = remove_stale_temp_files(
+            output_dir, prefix=OUTPUT_PREFIX
+        )
+
+        manifest = Manifest.load(output_dir)
+        existing_names = [path.name for path in output_dir.iterdir()]
 
     def save_manifest() -> None:
         manifest.save()
@@ -327,7 +474,6 @@ def process_folder(
                 "La próxima ejecución lo volverá a intentar."
             )
 
-    existing_names = [path.name for path in output_dir.iterdir()]
     existing = {name_key(name) for name in existing_names}
 
     def exists(name: str) -> bool:
@@ -336,7 +482,7 @@ def process_folder(
 
     # Todos los nombres base se deciden antes de procesar.
     plan = plan_outputs(
-        _discover_sources(input_dir),
+        sources,
         output_dir,
         options,
         existing_names,
@@ -350,36 +496,16 @@ def process_folder(
         source = entry.source
 
         if entry.error is not None:
-            summary.failed += 1
-            summary.errors.append(f"{source.name}: {entry.error}")
+            fail(source, entry.error)
             continue
 
         try:
-            source_sha256 = file_sha256(source)
-            source_size = source.stat().st_size
+            record = describe(source)
         except OSError as exc:
-            summary.failed += 1
-            summary.errors.append(f"{source.name}: {exc}")
+            fail(source, str(exc))
             continue
 
-        record = SourceRecord(
-            kind="local",
-            id=local_source_id(source, output_dir),
-            name=source.name,
-            size=source_size,
-            sha256=source_sha256,
-        )
-
-        identity = ResultIdentity(
-            source_kind=record.kind,
-            source_key=source_key(record.id),
-            source_sha256=source_sha256,
-            model=model_name,
-            width=options.width,
-            height=options.height,
-            background=options.background,
-            pipeline_version=PIPELINE_VERSION,
-        )
+        identity = result_identity(record, model_name, options)
 
         decision = _decide(
             source,
@@ -396,46 +522,56 @@ def process_folder(
 
         if decision.action == "skip":
             summary.skipped += 1
+            report(source, VERIFIED, decision.output_name)
 
         elif decision.action == "failed":
-            summary.failed += 1
-            summary.errors.append(f"{source.name}: {decision.message}")
+            fail(source, decision.message)
 
         elif decision.action == "unverified":
             summary.unverified += 1
             summary.warnings.append(decision.message)
+            report(source, UNVERIFIED, decision.output_name, decision.message)
 
         elif decision.action == "recover":
             name = decision.output_name
             registered = manifest.get(name)
 
-            manifest.put(
-                ManifestEntry(
-                    output_name=registered.output_name,
-                    status=COMPLETED,
-                    identity=registered.identity,
-                    source=registered.source,
-                    output_sha256=registered.output_sha256,
-                    recorded_at=now_utc(),
+            if not dry_run:
+                manifest.put(
+                    ManifestEntry(
+                        output_name=registered.output_name,
+                        status=COMPLETED,
+                        identity=registered.identity,
+                        source=registered.source,
+                        output_sha256=registered.output_sha256,
+                        recorded_at=now_utc(),
+                    )
                 )
-            )
 
-            try:
-                save_manifest()
-            except ManifestError as exc:
-                manifest.put(registered)
-                summary.failed += 1
-                summary.errors.append(f"{source.name}: {exc}")
-                continue
+                try:
+                    save_manifest()
+                except ManifestError as exc:
+                    manifest.put(registered)
+                    fail(source, str(exc))
+                    continue
 
             summary.recovered += 1
-            summary.warnings.append(
+            message = (
                 f"{name}: se completó su registro, interrumpido en "
                 "una ejecución anterior."
             )
+            summary.warnings.append(message)
+            report(source, RECOVERED, name, message)
 
         else:
             pending.append((source, decision.output_name, identity, record))
+
+    if dry_run:
+        for source, name, _, _ in pending:
+            summary.planned += 1
+            report(source, PLANNED, name)
+
+        return summary
 
     # Una sola inicialización por lote, antes de procesar.
     if pending:
@@ -446,7 +582,14 @@ def process_folder(
         previous = manifest.get(name)
 
         try:
-            with Image.open(source) as image:
+            data = _read_verified(source, record)
+
+            with Image.open(io.BytesIO(data)) as image:
+                image.load()
+                # Ya decodificada: se conserva la ruta del original,
+                # como al abrirla desde el disco.
+                image.filename = str(source)
+
                 result = process_image(
                     image,
                     model_name=identity.model,
@@ -459,10 +602,13 @@ def process_folder(
             result.save(buffer, format="PNG")
             data = buffer.getvalue()
 
+        except EmptySegmentationError as exc:
+            summary.segmentation_failed += 1
+            fail(source, str(exc), SEGMENTATION_FAILED, echo=True)
+            continue
+
         except Exception as exc:
-            summary.failed += 1
-            summary.errors.append(f"{source.name}: {exc}")
-            print(f"[ERROR] {source.name}")
+            fail(source, str(exc), echo=True)
             continue
 
         output_sha256 = hashlib.sha256(data).hexdigest()
@@ -487,9 +633,7 @@ def process_folder(
             else:
                 manifest.put(previous)
 
-            summary.failed += 1
-            summary.errors.append(f"{source.name}: {exc}")
-            print(f"[ERROR] {source.name}")
+            fail(source, str(exc), echo=True)
             continue
 
         try:
@@ -499,19 +643,17 @@ def process_folder(
 
         except FileExistsError:
             restore(name, previous)
-            summary.failed += 1
-            summary.errors.append(
-                f"{source.name}: apareció {name} sin registro durante "
-                "el lote. No se sobrescribe."
+            fail(
+                source,
+                f"apareció {name} sin registro durante el lote. "
+                "No se sobrescribe.",
+                echo=True,
             )
-            print(f"[ERROR] {source.name}")
             continue
 
         except Exception as exc:
             restore(name, previous)
-            summary.failed += 1
-            summary.errors.append(f"{source.name}: {exc}")
-            print(f"[ERROR] {source.name}")
+            fail(source, str(exc), echo=True)
             continue
 
         # Segunda fase: el PNG está publicado; se completa el registro.
@@ -532,10 +674,25 @@ def process_folder(
             unsaved.append(name)
 
         summary.processed += 1
-        print(f"[OK] {source.name}")
+        report(source, PROCESSED, name, echo=f"[OK] {source.name}")
 
     # Lo que ningún guardado posterior llegó a persistir.
     summary.unregistered = len(unsaved)
+
+    if unsaved:
+        pending_names = set(unsaved)
+        summary.items = [
+            ItemResult(
+                item.source,
+                item.status,
+                item.output_name,
+                item.message,
+                registered=item.output_name not in pending_names,
+            )
+            if item.status == PROCESSED
+            else item
+            for item in summary.items
+        ]
 
     for name in unsaved:
         summary.warnings.append(

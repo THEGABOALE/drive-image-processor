@@ -5,18 +5,27 @@ Consulta y descarga de solo lectura de Google Drive.
     python -m image_processor.drive_cli list-folders
     python -m image_processor.drive_cli list-images --folder-id ID [--originals-only]
     python -m image_processor.drive_cli download --folder-id ID --output DIR [--limit N]
+    python -m image_processor.drive_cli process-local --folder-id ID --input DIR --output DIR
     python -m image_processor.drive_cli logout
+
+process-local trabaja solo con archivos locales: no se conecta a
+Drive ni lee la autorización.
 
 Códigos de salida:
 
 0  Operación completada.
 1  Error inesperado de Google Drive.
-2  Argumentos inválidos.
+2  Argumentos o carpetas inválidos.
 3  Autorización ausente, expirada, revocada o insuficiente.
 4  Sin permiso, inexistente o no es una carpeta.
 5  Error de red o límite de solicitudes después de los reintentos.
 6  download: alguna imagen no se pudo descargar o verificar, o su
    registro quedó pendiente.
+   process-local: lote parcial (imágenes rechazadas o fallidas, o
+   resultados sin verificar o con el registro pendiente).
+7  process-local: no se pudo inicializar el modelo; no se procesó nada.
+8  process-local: el manifiesto del destino está dañado o el destino
+   contiene resultados de otra carpeta de Drive; no se procesó nada.
 """
 
 import argparse
@@ -24,7 +33,9 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from .google_drive import auth, client, downloads, queries
+from . import batch
+from .background_removal import SUPPORTED_MODELS, ModelInitializationError
+from .google_drive import auth, client, downloads, local_processing, queries
 from .google_drive.errors import (
     DriveAccessError,
     DriveAuthError,
@@ -32,6 +43,16 @@ from .google_drive.errors import (
     DriveNotAFolderError,
     DriveNotFoundError,
     DriveTransientError,
+)
+from .manifest import ManifestError
+from .processing import (
+    BACKGROUNDS,
+    DEFAULT_BACKGROUND,
+    DEFAULT_HEIGHT,
+    DEFAULT_WIDTH,
+    MAX_SIDE,
+    MIN_SIDE,
+    OutputOptions,
 )
 
 
@@ -232,6 +253,173 @@ def _command_download(args) -> int:
     return 0
 
 
+_PROCESS_LABELS = {
+    batch.PROCESSED: "[OK]",
+    batch.VERIFIED: "[VERIFICADA]",
+    batch.RECOVERED: "[RECUPERADA]",
+    batch.UNVERIFIED: "[SIN VERIFICAR]",
+    batch.FAILED: "[ERROR]",
+    batch.SEGMENTATION_FAILED: "[SEGMENTACIÓN VACÍA]",
+    batch.PLANNED: "[SE PROCESARÍA]",
+}
+
+
+def _is_inside(path: Path, directory: Path) -> bool:
+    try:
+        path.resolve().relative_to(directory.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _command_process_local(args) -> int:
+    options = OutputOptions(
+        width=args.width, height=args.height, background=args.background
+    )
+
+    if args.limit is not None and args.limit < 1:
+        raise ValueError("--limit debe ser al menos 1.")
+
+    queries.validate_file_id(args.folder_id)
+
+    # Nada se lee ni se escribe en la carpeta de secretos.
+    secrets = auth.secret_paths(args.secrets_dir).directory
+
+    for label, path in (("--input", args.input), ("--output", args.output)):
+        if _is_inside(path, secrets):
+            raise ValueError(
+                f"{label} no puede estar dentro de la carpeta de secretos "
+                f"({secrets})."
+            )
+
+    if not args.input.is_dir():
+        raise ValueError(f"No existe la carpeta de descargas: {args.input}")
+
+    print("\nProcesamiento local de descargas de Drive (sin conexión a Drive)")
+    print(f"Carpeta de Drive: {args.folder_id}")
+    print(f"Descargas: {args.input}")
+    print(f"Destino:   {args.output}")
+    print(
+        f"Resultado: {options.width} x {options.height} px, fondo "
+        f"{options.background}, modelo {args.model}"
+    )
+
+    if args.dry_run:
+        print("VISTA PREVIA: no se inicializa el modelo ni se escribe nada.")
+
+    print()
+
+    def show(source, item):
+        line = (
+            f"{_PROCESS_LABELS[item.status]} {source.remote_name} "
+            f"({source.file_id})"
+        )
+
+        if item.output_name:
+            line += f" -> {item.output_name}"
+
+        if item.message and item.status != batch.RECOVERED:
+            line += f": {item.message}"
+
+        failed = item.status in (batch.FAILED, batch.SEGMENTATION_FAILED)
+        print(line, file=sys.stderr if failed else sys.stdout)
+
+    try:
+        result = local_processing.process_downloads(
+            args.input,
+            args.output,
+            args.folder_id,
+            model_name=args.model,
+            options=options,
+            limit=args.limit,
+            dry_run=args.dry_run,
+            on_item=show,
+        )
+    except (ManifestError, local_processing.ForeignFolderError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        print("No se procesó ninguna imagen.", file=sys.stderr)
+        return 8
+    except ModelInitializationError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        print(
+            "No se procesó ninguna imagen. Verifique la conexión de red o "
+            "la caché de modelos.",
+            file=sys.stderr,
+        )
+        return 7
+
+    discovery = result.discovery
+    summary = result.batch
+
+    for item in discovery.rejected:
+        print(f"[RECHAZADA] {item.name}: {item.reason}")
+
+    if not discovery.sources and not discovery.rejected:
+        print(
+            "No hay imágenes descargadas con procedencia de GD-02 para "
+            "esta carpeta de Drive."
+        )
+
+    rejected = Counter(item.reason for item in discovery.rejected)
+    pending = summary.unverified + summary.unregistered
+    ready = sum(item.ready for item in result.prepared)
+
+    print("\n===== RESUMEN DEL PROCESAMIENTO =====")
+
+    if args.dry_run:
+        print(f"Se procesarían:             {summary.planned}")
+    else:
+        print(f"Procesadas:                 {summary.processed}")
+
+    print(f"Verificadas previamente:    {summary.skipped}")
+
+    if summary.recovered:
+        print(f"Registros recuperados:      {summary.recovered}")
+
+    print(f"Rechazadas:                 {len(discovery.rejected)}")
+
+    for reason, count in sorted(rejected.items()):
+        print(f"  - {reason} ({count})")
+
+    print(f"Fallos de segmentación:     {summary.segmentation_failed}")
+
+    other_failures = summary.failed - summary.segmentation_failed
+    if other_failures:
+        print(f"Otros fallos:               {other_failures}")
+
+    print(f"Resultados pendientes:      {pending}")
+    print(f"PNG generados:              {summary.processed}")
+    print(f"Listos para subir (GD-03B): {ready} de {len(result.prepared)}")
+
+    if discovery.other_folder:
+        print(f"De otra carpeta (excluidas): {len(discovery.other_folder)}")
+
+    if discovery.superseded:
+        print(f"Revisiones anteriores:      {len(discovery.superseded)}")
+
+    if summary.temp_removed:
+        print(f"Temporales antiguos eliminados: {summary.temp_removed}")
+
+    if summary.errors:
+        print("\nErrores encontrados:")
+        for error in summary.errors:
+            print(f"  - {error}", file=sys.stderr)
+
+    if summary.warnings:
+        print("\nAdvertencias:")
+        for warning in summary.warnings:
+            print(f"  - {warning}", file=sys.stderr)
+
+    if not result.complete:
+        print(
+            "\nLote parcial: hay imágenes sin procesar o resultados sin "
+            "verificar. Revise los mensajes anteriores."
+        )
+        return 6
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Consulta de solo lectura de Google Drive"
@@ -302,6 +490,52 @@ def main(argv: list[str] | None = None) -> int:
         help="Muestra cada archivo rechazado y el motivo",
     )
     download.set_defaults(handler=_command_download)
+
+    process = commands.add_parser(
+        "process-local",
+        help=(
+            "Procesa las imágenes ya descargadas de una carpeta "
+            "(sin conexión a Drive)"
+        ),
+    )
+    process.add_argument(
+        "--folder-id", required=True,
+        help="ID de la carpeta de Drive de origen de las descargas",
+    )
+    process.add_argument(
+        "--input", type=Path, required=True,
+        help="Carpeta de descargas de GD-02",
+    )
+    process.add_argument(
+        "--output", type=Path, required=True,
+        help="Carpeta de resultados (puede ser la misma)",
+    )
+    process.add_argument(
+        "--model", choices=SUPPORTED_MODELS,
+        default=local_processing.DEFAULT_MODEL,
+        help=f"Modelo de eliminación de fondo (por defecto, {local_processing.DEFAULT_MODEL})",
+    )
+    process.add_argument(
+        "--background", choices=BACKGROUNDS, default=DEFAULT_BACKGROUND,
+        help=f"Fondo del resultado (por defecto, {DEFAULT_BACKGROUND})",
+    )
+    process.add_argument(
+        "--width", type=int, default=DEFAULT_WIDTH,
+        help=f"Ancho en píxeles, entre {MIN_SIDE} y {MAX_SIDE} (por defecto, {DEFAULT_WIDTH})",
+    )
+    process.add_argument(
+        "--height", type=int, default=DEFAULT_HEIGHT,
+        help=f"Alto en píxeles, entre {MIN_SIDE} y {MAX_SIDE} (por defecto, {DEFAULT_HEIGHT})",
+    )
+    process.add_argument(
+        "--limit", type=int, default=None,
+        help="Máximo de imágenes a procesar o verificar (para pruebas)",
+    )
+    process.add_argument(
+        "--dry-run", action="store_true",
+        help="Muestra qué se haría sin inicializar el modelo ni escribir nada",
+    )
+    process.set_defaults(handler=_command_process_local)
 
     args = parser.parse_args(argv)
 
