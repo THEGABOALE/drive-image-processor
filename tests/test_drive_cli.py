@@ -211,18 +211,23 @@ def test_fake_drive_rejects_write_operations():
 
 def test_drive_code_has_no_write_calls():
     sources = [PACKAGE / "drive_cli.py", *sorted((PACKAGE / "google_drive").glob("*.py"))]
-    # Llamadas de escritura a los recursos de Drive y subidas.
+    # Modificaciones de archivos existentes: prohibidas en todo el código.
     writes = re.compile(
-        r"\.files\(\)\s*\.\s*(create|update|delete|copy|emptyTrash|"
-        r"trash|untrash|export|export_media|watch|generateIds|modifyLabels)\(|"
+        r"\.files\(\)\s*\.\s*(update|delete|copy|emptyTrash|"
+        r"trash|untrash|export|export_media|watch|modifyLabels)\(|"
         r"\.(permissions|revisions|comments|replies|drives|changes|channels)\(\)|"
-        r"MediaFileUpload|MediaIoBaseUpload|MediaUpload"
+        r"MediaFileUpload"
     )
+    # GD-03B: solo uploads.py crea archivos nuevos.
+    creates = re.compile(r"\.files\(\)\s*\.\s*(create|generateIds)\(|MediaIoBaseUpload")
     downloads = re.compile(r"get_media\(|MediaIoBaseDownload")
 
     for source in sources:
         code = source.read_text(encoding="utf-8")
         assert writes.search(code) is None, source.name
+
+        if source.name != "uploads.py":
+            assert creates.search(code) is None, source.name
 
         # GD-02: solo el módulo de descargas lee contenido.
         if source.name != "downloads.py":

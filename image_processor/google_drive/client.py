@@ -27,6 +27,7 @@ from googleapiclient.errors import HttpError
 from .errors import (
     DriveAccessError,
     DriveAuthError,
+    DriveCertificateError,
     DriveError,
     DriveNetworkError,
     DriveNotFoundError,
@@ -155,7 +156,7 @@ def translate_error(exc: BaseException) -> TranslatedError | None:
 
     if isinstance(exc, ssl.SSLCertVerificationError):
         return TranslatedError(
-            DriveNetworkError(
+            DriveCertificateError(
                 "No se pudo verificar el certificado SSL de Google. "
                 "Revise la red (por ejemplo, un proxy que intercepta "
                 "HTTPS). La verificación no se desactiva."

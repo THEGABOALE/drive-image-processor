@@ -21,6 +21,13 @@ class DriveAccessError(DriveError):
     """La cuenta autorizada no tiene permiso para el recurso (403)."""
 
 
+class DriveWriteAccessError(DriveAccessError):
+    """
+    La autorización de escritura (drive.file) no tiene acceso a la
+    carpeta de destino: no la creó la aplicación ni fue autorizada.
+    """
+
+
 class DriveNotFoundError(DriveError):
     """El recurso no existe o no es visible para la cuenta (404)."""
 
@@ -39,6 +46,10 @@ class DriveRateLimitError(DriveTransientError):
 
 class DriveNetworkError(DriveTransientError):
     """No se pudo comunicar con Google."""
+
+
+class DriveCertificateError(DriveNetworkError):
+    """Certificado SSL inválido: no se reintenta ni se desactiva."""
 
 
 class DriveResponseError(DriveError):

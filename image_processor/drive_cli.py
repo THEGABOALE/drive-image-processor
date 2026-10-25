@@ -6,10 +6,15 @@ Consulta y descarga de solo lectura de Google Drive.
     python -m image_processor.drive_cli list-images --folder-id ID [--originals-only]
     python -m image_processor.drive_cli download --folder-id ID --output DIR [--limit N]
     python -m image_processor.drive_cli process-local --folder-id ID --input DIR --output DIR
-    python -m image_processor.drive_cli logout
+    python -m image_processor.drive_cli auth-write
+    python -m image_processor.drive_cli upload --folder-id ID --input DIR --limit N [--dry-run]
+    python -m image_processor.drive_cli logout [--write]
 
 process-local trabaja solo con archivos locales: no se conecta a
 Drive ni lee la autorización.
+
+auth-write y upload usan una autorización de escritura separada
+(drive.file, en token_write.json). La de solo lectura no se modifica.
 
 Códigos de salida:
 
@@ -23,9 +28,14 @@ Códigos de salida:
    registro quedó pendiente.
    process-local: lote parcial (imágenes rechazadas o fallidas, o
    resultados sin verificar o con el registro pendiente).
+   upload: algún PNG se rechazó, falló o quedó con estado incierto.
 7  process-local: no se pudo inicializar el modelo; no se procesó nada.
 8  process-local: el manifiesto del destino está dañado o el destino
    contiene resultados de otra carpeta de Drive; no se procesó nada.
+   upload: el manifiesto de los resultados está dañado; no se subió nada.
+
+En upload, 3 incluye la autorización de escritura ausente o revocada
+y 4 una carpeta de destino sin acceso para drive.file.
 """
 
 import argparse
@@ -35,7 +45,7 @@ from pathlib import Path
 
 from . import batch
 from .background_removal import SUPPORTED_MODELS, ModelInitializationError
-from .google_drive import auth, client, downloads, local_processing, queries
+from .google_drive import auth, client, downloads, local_processing, queries, uploads
 from .google_drive.errors import (
     DriveAccessError,
     DriveAuthError,
@@ -56,11 +66,11 @@ from .processing import (
 )
 
 
-def _connect(secrets_dir, interactive=False):
+def _connect(secrets_dir, interactive=False, profile=auth.READ):
     paths = auth.secret_paths(secrets_dir)
     notices = []
     credentials = auth.get_credentials(
-        paths, interactive=interactive, notices=notices
+        paths, interactive=interactive, notices=notices, profile=profile
     )
 
     for notice in notices:
@@ -86,11 +96,29 @@ def _command_auth(args) -> int:
     return 0
 
 
+def _command_auth_write(args) -> int:
+    paths, service = _connect(args.secrets_dir, interactive=True, profile=auth.WRITE)
+    account = queries.verify_connection(service)
+
+    who = account.display_name or "(sin nombre)"
+    email = f" <{account.email}>" if account.email else ""
+
+    print(f"Autorización de escritura verificada: {who}{email}")
+    print(
+        f"Permiso: {auth.WRITE_SCOPE} (solo crea archivos propios; no ve "
+        "ni modifica los demás)"
+    )
+    print(f"Autorización guardada en: {paths.write_token}")
+    print(f"La autorización de solo lectura ({paths.token}) no se modificó.")
+    return 0
+
+
 def _command_logout(args) -> int:
     paths = auth.secret_paths(args.secrets_dir)
+    profile = auth.WRITE if args.write else auth.READ
 
-    if auth.logout(paths):
-        print(f"Se eliminó la autorización local: {paths.token}")
+    if auth.logout(paths, profile):
+        print(f"Se eliminó la autorización local: {profile.token_path(paths)}")
         print(
             "Para revocar el acceso en Google, use la configuración de "
             "seguridad de su cuenta (aplicaciones de terceros)."
@@ -420,6 +448,130 @@ def _command_process_local(args) -> int:
     return 0
 
 
+_UPLOAD_LABELS = {
+    uploads.UPLOADED: "[SUBIDA]",
+    uploads.VERIFIED: "[VERIFICADA]",
+    uploads.RECOVERED: "[CONFIRMADA]",
+    uploads.REJECTED: "[RECHAZADA]",
+    uploads.FAILED: "[ERROR]",
+    uploads.UNCERTAIN: "[INCIERTA]",
+    uploads.PLANNED: "[SE SUBIRÍA]",
+}
+
+
+def _command_upload(args) -> int:
+    options = OutputOptions(
+        width=args.width, height=args.height, background=args.background
+    )
+
+    if args.limit < 1:
+        raise ValueError("--limit debe ser al menos 1.")
+
+    queries.validate_file_id(args.folder_id)
+    target_id = args.target_folder_id or args.folder_id
+    queries.validate_file_id(target_id)
+
+    secrets = auth.secret_paths(args.secrets_dir).directory
+
+    if _is_inside(args.input, secrets):
+        raise ValueError(
+            f"--input no puede estar dentro de la carpeta de secretos ({secrets})."
+        )
+
+    if not args.input.is_dir():
+        raise ValueError(f"No existe la carpeta de resultados: {args.input}")
+
+    _, read_service = _connect(args.secrets_dir)
+
+    try:
+        _, write_service = _connect(args.secrets_dir, profile=auth.WRITE)
+    except DriveAuthError as exc:
+        if not args.dry_run:
+            raise
+        write_service = None
+        print(
+            f"[AVISO] {exc} La vista previa continúa sin comprobar el "
+            "acceso de escritura."
+        )
+
+    print("\nSubida de resultados a Google Drive")
+    print(f"Carpeta de los originales: {args.folder_id}")
+    print(f"Resultados locales: {args.input}")
+    print(
+        f"Resultado: {options.width} x {options.height} px, fondo "
+        f"{options.background}, modelo {args.model}"
+    )
+
+    if args.dry_run:
+        print("VISTA PREVIA: no se escribe nada en Google Drive ni en disco.")
+
+    print()
+
+    def show(item):
+        line = f"{_UPLOAD_LABELS[item.status]} {item.output_name}"
+
+        if item.remote_name:
+            line += f" -> {item.remote_name}"
+
+        if item.remote_id:
+            line += f" ({item.remote_id})"
+
+        if item.reason:
+            line += f": {item.reason}"
+
+        failed = item.status in (uploads.FAILED, uploads.UNCERTAIN)
+        print(line, file=sys.stderr if failed else sys.stdout)
+
+    try:
+        summary = uploads.upload_results(
+            read_service,
+            write_service,
+            args.input,
+            args.folder_id,
+            target_folder_id=target_id,
+            model_name=args.model,
+            options=options,
+            limit=args.limit,
+            dry_run=args.dry_run,
+            on_item=show,
+        )
+    except ManifestError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        print("No se subió ninguna imagen.", file=sys.stderr)
+        return 8
+
+    target = summary.target
+    verified = summary.count(uploads.VERIFIED) + summary.count(uploads.RECOVERED)
+
+    print(f"\nDestino: {target.name} ({target.id})")
+    print("\n===== RESUMEN DE LA SUBIDA =====")
+
+    if args.dry_run:
+        print(f"Se subirían:                {summary.count(uploads.PLANNED)}")
+    else:
+        print(f"Subidas:                    {summary.count(uploads.UPLOADED)}")
+
+    print(f"Verificadas previamente:    {verified}")
+    print(f"Rechazadas:                 {summary.count(uploads.REJECTED)}")
+    print(f"Fallidas:                   {summary.count(uploads.FAILED)}")
+    print(f"Pendientes:                 {summary.count(uploads.UNCERTAIN)}")
+    print(f"Bytes subidos:              {_format_size(summary.bytes_uploaded)}")
+
+    if summary.count(uploads.UNCERTAIN):
+        print(
+            "\nHay subidas con estado incierto: vuelva a ejecutar el comando; "
+            "se comprobarán con su ID reservado, sin crear duplicados."
+        )
+
+    if summary.aborted is not None:
+        raise summary.aborted
+
+    if not summary.complete:
+        return 6
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Consulta de solo lectura de Google Drive"
@@ -441,8 +593,21 @@ def main(argv: list[str] | None = None) -> int:
     ).set_defaults(handler=_command_auth)
 
     commands.add_parser(
+        "auth-write",
+        help=(
+            "Autoriza la creación de archivos propios (drive.file), sin "
+            "modificar la autorización de solo lectura"
+        ),
+    ).set_defaults(handler=_command_auth_write)
+
+    logout = commands.add_parser(
         "logout", help="Elimina la autorización guardada localmente"
-    ).set_defaults(handler=_command_logout)
+    )
+    logout.add_argument(
+        "--write", action="store_true",
+        help="Elimina la autorización de escritura en lugar de la de lectura",
+    )
+    logout.set_defaults(handler=_command_logout)
 
     commands.add_parser(
         "list-folders", help="Lista las carpetas accesibles con su ID"
@@ -536,6 +701,52 @@ def main(argv: list[str] | None = None) -> int:
         help="Muestra qué se haría sin inicializar el modelo ni escribir nada",
     )
     process.set_defaults(handler=_command_process_local)
+
+    upload = commands.add_parser(
+        "upload",
+        help="Sube a Drive los PNG verificados por process-local",
+    )
+    upload.add_argument(
+        "--folder-id", required=True,
+        help="ID de la carpeta de Drive de los originales",
+    )
+    upload.add_argument(
+        "--input", type=Path, required=True,
+        help="Carpeta de resultados de process-local",
+    )
+    upload.add_argument(
+        "--target-folder-id", default=None,
+        help=(
+            "Carpeta de Drive de destino (por defecto, la de los "
+            "originales). Debe ser accesible para drive.file"
+        ),
+    )
+    upload.add_argument(
+        "--limit", type=int, required=True,
+        help="Máximo de PNG a subir o verificar (obligatorio)",
+    )
+    upload.add_argument(
+        "--model", choices=SUPPORTED_MODELS,
+        default=uploads.DEFAULT_MODEL,
+        help=f"Modelo con el que se generaron (por defecto, {uploads.DEFAULT_MODEL})",
+    )
+    upload.add_argument(
+        "--background", choices=BACKGROUNDS, default=DEFAULT_BACKGROUND,
+        help=f"Fondo de los resultados (por defecto, {DEFAULT_BACKGROUND})",
+    )
+    upload.add_argument(
+        "--width", type=int, default=DEFAULT_WIDTH,
+        help=f"Ancho de los resultados (por defecto, {DEFAULT_WIDTH})",
+    )
+    upload.add_argument(
+        "--height", type=int, default=DEFAULT_HEIGHT,
+        help=f"Alto de los resultados (por defecto, {DEFAULT_HEIGHT})",
+    )
+    upload.add_argument(
+        "--dry-run", action="store_true",
+        help="Muestra qué se subiría sin escribir nada en Drive",
+    )
+    upload.set_defaults(handler=_command_upload)
 
     args = parser.parse_args(argv)
 

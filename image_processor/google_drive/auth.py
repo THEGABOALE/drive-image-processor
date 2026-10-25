@@ -1,18 +1,27 @@
 """
 OAuth 2.0 para una aplicación local de escritorio.
 
-Scope: drive.readonly. Es un scope restringido de Google: sirve
-para esta prueba local con una cuenta autorizada como usuario de
-prueba, pero una aplicación pública que lo use puede requerir la
-verificación de Google. Los permisos mínimos de producción
-(drive.file y Google Picker) se estudiarán más adelante.
+Dos autorizaciones independientes, cada una con su token:
+
+- Lectura (READ, comando auth): drive.readonly, en token.json. Es un
+  scope restringido de Google: sirve para esta prueba local con una
+  cuenta autorizada como usuario de prueba, pero una aplicación
+  pública que lo use puede requerir la verificación de Google.
+- Escritura (WRITE, comando auth-write, GD-03B): exactamente
+  drive.file, en token_write.json. Es un scope no sensible: solo da
+  acceso a los archivos que crea la aplicación y a los que el usuario
+  le comparte (por ejemplo, con Google Picker). Un token con permisos
+  más amplios (drive) se rechaza: nunca se usa como alternativa.
+
+Autorizar la escritura nunca lee, modifica ni reemplaza token.json.
 
 Los secretos se guardan en una carpeta privada configurable
 (por defecto .secrets/, excluida de Git):
 
 - credentials.json: cliente OAuth de tipo "aplicación de
   escritorio", descargado de Google Cloud Console.
-- token.json: token de acceso y de actualización de la cuenta.
+- token.json y token_write.json: tokens de acceso y de
+  actualización de la cuenta.
 
 Ningún mensaje ni registro incluye el contenido de esos archivos.
 """
@@ -40,16 +49,21 @@ from .errors import DriveAuthError, DriveNetworkError
 READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 SCOPES = (READONLY_SCOPE,)
 
+WRITE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+WRITE_SCOPES = (WRITE_SCOPE,)
+
 SECRETS_DIR_ENV = "DRIVE_IMAGE_PROCESSOR_SECRETS_DIR"
 DEFAULT_SECRETS_DIR = Path(".secrets")
 
 CLIENT_SECRET_NAME = "credentials.json"
 TOKEN_NAME = "token.json"
+WRITE_TOKEN_NAME = "token_write.json"
 
 # Tiempo máximo para completar la autorización en el navegador.
 LOGIN_TIMEOUT_SECONDS = 300
 
 AUTH_COMMAND = "python -m image_processor.drive_cli auth"
+AUTH_WRITE_COMMAND = "python -m image_processor.drive_cli auth-write"
 
 
 @dataclass(frozen=True)
@@ -57,6 +71,59 @@ class SecretPaths:
     directory: Path
     client_secret: Path
     token: Path
+    write_token: Path
+
+
+@dataclass(frozen=True)
+class AuthProfile:
+    """
+    Una autorización: sus scopes, su token y cómo se renueva.
+
+    exact exige que el token tenga exactamente esos scopes (ni más
+    amplios ni adicionales); si no, basta con que los incluya.
+    """
+
+    scopes: tuple[str, ...]
+    token_attr: str
+    command: str
+    permission: str
+    prompt: str
+    exact: bool = False
+
+    def token_path(self, paths: SecretPaths) -> Path:
+        return getattr(paths, self.token_attr)
+
+    def accepts(self, granted: set[str]) -> bool:
+        if self.exact:
+            return granted == set(self.scopes)
+        return set(self.scopes) <= granted
+
+
+READ = AuthProfile(
+    scopes=SCOPES,
+    token_attr="token",
+    command=AUTH_COMMAND,
+    permission="el permiso de solo lectura de Drive",
+    prompt=(
+        "Abra esta dirección para autorizar el acceso de solo "
+        "lectura a Google Drive:\n{url}"
+    ),
+)
+
+WRITE = AuthProfile(
+    scopes=WRITE_SCOPES,
+    token_attr="write_token",
+    command=AUTH_WRITE_COMMAND,
+    permission=(
+        "exactamente el permiso drive.file (crear archivos propios); "
+        "no se usan permisos más amplios"
+    ),
+    prompt=(
+        "Abra esta dirección para autorizar que la aplicación cree "
+        "archivos propios en Google Drive (drive.file):\n{url}"
+    ),
+    exact=True,
+)
 
 
 def secret_paths(directory: Path | None = None) -> SecretPaths:
@@ -73,6 +140,7 @@ def secret_paths(directory: Path | None = None) -> SecretPaths:
         directory=directory,
         client_secret=directory / CLIENT_SECRET_NAME,
         token=directory / TOKEN_NAME,
+        write_token=directory / WRITE_TOKEN_NAME,
     )
 
 
@@ -122,7 +190,7 @@ def _network_error(error: BaseException, action: str) -> DriveNetworkError:
     )
 
 
-def load_token(path: Path):
+def load_token(path: Path, command: str = AUTH_COMMAND):
     """Credenciales guardadas, o None si no hay token."""
 
     path = Path(path)
@@ -137,7 +205,7 @@ def load_token(path: Path):
         # Sin detalles: el contenido del archivo es secreto.
         raise DriveAuthError(
             f"El token guardado en {path} no es válido. "
-            f"Vuelva a autorizar con: {AUTH_COMMAND}"
+            f"Vuelva a autorizar con: {command}"
         ) from None
 
 
@@ -178,7 +246,7 @@ def save_token(credentials, path: Path) -> None:
         raise
 
 
-def _preserve_damaged_token(path: Path) -> Path:
+def _preserve_damaged_token(path: Path, command: str = AUTH_COMMAND) -> Path:
     """
     Aparta, sin modificarlo, un token dañado antes de guardar uno
     nuevo. Queda en la misma carpeta privada como
@@ -195,13 +263,13 @@ def _preserve_damaged_token(path: Path) -> Path:
         raise DriveAuthError(
             f"La autorización se completó, pero no se pudo conservar el "
             f"token dañado {path}, así que no se reemplazó. Muévalo "
-            f"manualmente y vuelva a ejecutar: {AUTH_COMMAND}"
+            f"manualmente y vuelva a ejecutar: {command}"
         ) from None
 
     return backup
 
 
-def _authorize(paths: SecretPaths, flow_factory):
+def _authorize(paths: SecretPaths, flow_factory, profile: AuthProfile = READ):
     """
     Flujo interactivo en el navegador. No se reintenta: cualquier
     fallo se traduce a un error controlado, sin traceback ni datos
@@ -221,7 +289,7 @@ def _authorize(paths: SecretPaths, flow_factory):
     )
 
     try:
-        flow = flow_factory(str(paths.client_secret), list(SCOPES))
+        flow = flow_factory(str(paths.client_secret), list(profile.scopes))
     except (OSError, ValueError, KeyError):
         raise invalid_client from None
 
@@ -230,10 +298,7 @@ def _authorize(paths: SecretPaths, flow_factory):
             port=0,
             open_browser=True,
             timeout_seconds=LOGIN_TIMEOUT_SECONDS,
-            authorization_prompt_message=(
-                "Abra esta dirección para autorizar el acceso de solo "
-                "lectura a Google Drive:\n{url}"
-            ),
+            authorization_prompt_message=profile.prompt,
             success_message=(
                 "Autorización completada. Puede cerrar esta ventana."
             ),
@@ -267,7 +332,7 @@ def _authorize(paths: SecretPaths, flow_factory):
         # oauthlib avisa así que se concedió otro scope; la excepción
         # incluye los tokens recibidos, por eso no se muestra.
         raise DriveAuthError(
-            "La cuenta no concedió el permiso de solo lectura de Drive."
+            f"La cuenta no concedió {profile.permission}."
         ) from None
 
     except KeyError:
@@ -282,10 +347,8 @@ def _authorize(paths: SecretPaths, flow_factory):
         # Por ejemplo, no se pudo abrir el servidor local de retorno.
         raise _network_error(exc, "completar la autorización") from None
 
-    if READONLY_SCOPE not in _granted_scopes(credentials):
-        raise DriveAuthError(
-            "La cuenta no concedió el permiso de solo lectura de Drive."
-        )
+    if not profile.accepts(_granted_scopes(credentials)):
+        raise DriveAuthError(f"La cuenta no concedió {profile.permission}.")
 
     return credentials
 
@@ -297,9 +360,11 @@ def get_credentials(
     flow_factory=InstalledAppFlow.from_client_secrets_file,
     request_factory=Request,
     notices: list[str] | None = None,
+    profile: AuthProfile = READ,
 ):
     """
-    Credenciales válidas para Drive.
+    Credenciales válidas para Drive con la autorización profile
+    (READ por defecto, o WRITE). Cada una usa solo su token.
 
     1. Reutiliza el token guardado si es válido.
     2. Si expiró y tiene token de actualización, lo renueva y lo
@@ -314,22 +379,24 @@ def get_credentials(
     notices recibe los avisos para el usuario.
     """
     damaged = False
+    token_path = profile.token_path(paths)
+    command = profile.command
 
     try:
-        credentials = load_token(paths.token)
+        credentials = load_token(token_path, command)
     except DriveAuthError:
         if not interactive:
             raise
         credentials = None
         damaged = True
 
-    if credentials is not None and READONLY_SCOPE not in _granted_scopes(
-        credentials
+    if credentials is not None and not profile.accepts(
+        _granted_scopes(credentials)
     ):
         if not interactive:
             raise DriveAuthError(
-                "El token guardado no tiene el permiso de solo lectura "
-                f"de Drive. Vuelva a autorizar con: {AUTH_COMMAND}"
+                f"El token guardado no tiene {profile.permission}. "
+                f"Vuelva a autorizar con: {command}"
             )
         credentials = None
 
@@ -343,25 +410,25 @@ def get_credentials(
             if not interactive:
                 raise DriveAuthError(
                     "La autorización expiró o fue revocada. "
-                    f"Vuelva a autorizar con: {AUTH_COMMAND}"
+                    f"Vuelva a autorizar con: {command}"
                 ) from None
             credentials = None
         except TransportError as exc:
             raise _network_error(exc, "renovar la autorización") from None
         else:
-            save_token(credentials, paths.token)
+            save_token(credentials, token_path)
             return credentials
 
     if not interactive:
         raise DriveAuthError(
             "No hay una autorización válida guardada. "
-            f"Autorice con: {AUTH_COMMAND}"
+            f"Autorice con: {command}"
         )
 
-    credentials = _authorize(paths, flow_factory)
+    credentials = _authorize(paths, flow_factory, profile)
 
     if damaged:
-        backup = _preserve_damaged_token(paths.token)
+        backup = _preserve_damaged_token(token_path, command)
 
         if notices is not None:
             notices.append(
@@ -370,20 +437,21 @@ def get_credentials(
                 "no lo necesita."
             )
 
-    save_token(credentials, paths.token)
+    save_token(credentials, token_path)
 
     return credentials
 
 
-def logout(paths: SecretPaths) -> bool:
+def logout(paths: SecretPaths, profile: AuthProfile = READ) -> bool:
     """
-    Elimina el token local. Devuelve False si no existía.
+    Elimina el token local de esa autorización (solo ese). Devuelve
+    False si no existía.
 
     El acceso también puede revocarse desde la cuenta de Google
     (Seguridad > Aplicaciones de terceros).
     """
     try:
-        paths.token.unlink()
+        profile.token_path(paths).unlink()
     except FileNotFoundError:
         return False
 
