@@ -1,4 +1,5 @@
 
+import errno
 import hashlib
 import io
 import json
@@ -912,3 +913,204 @@ def test_cli_individual_failures_exit_code(cli, capsys):
     # Dos fallos de red no alcanzan para detener el lote.
     assert cli() == 6
     assert "Fallidas (no publicadas):   2" in capsys.readouterr().out
+
+
+# --- Revisión GD-02 ----------------------------------------------------
+
+class _FailingFile:
+    """Archivo local cuya escritura falla (disco lleno, permisos)."""
+
+    def __init__(self, file, error):
+        self._file = file
+        self._error = error
+
+    def write(self, data):
+        raise self._error
+
+    def __getattr__(self, name):
+        return getattr(self._file, name)
+
+    def __enter__(self):
+        self._file.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._file.__exit__(*exc)
+
+
+def fail_local_writes(monkeypatch, error):
+    real_fdopen = os.fdopen
+
+    def fdopen(fd, mode="r", *args, **kwargs):
+        file = real_fdopen(fd, mode, *args, **kwargs)
+        return _FailingFile(file, error) if "w" in mode else file
+
+    monkeypatch.setattr(downloads.os, "fdopen", fdopen)
+
+
+# GD02-R1: errores locales de escritura -----------------------------------
+
+@pytest.mark.parametrize(
+    "error, message",
+    [
+        (OSError(errno.ENOSPC, "No space left on device"), "espacio"),
+        (PermissionError(errno.EACCES, "Permission denied"), "permiso"),
+    ],
+)
+def test_local_write_errors_are_not_network_errors(
+    download, sleeps, monkeypatch, error, message
+):
+    files = [
+        (media_item(f"loc{index}", f"foto{index}.jpg", JPEG), JPEG)
+        for index in range(4)
+    ]
+    drive = make_drive(*files)
+
+    with monkeypatch.context() as patch:
+        fail_local_writes(patch, error)
+        summary = download(drive)
+
+    # Cada imagen falla por la escritura local, sin reintentos de red.
+    assert summary.count(downloads.FAILED) == 4
+    assert all("local" in item.reason and message in item.reason for item in summary.items)
+    assert all("red" not in item.reason for item in summary.items)
+    assert sleeps == []
+    assert len(drive.media_requests) == 4
+
+    # No se confunde con tres fallos de red seguidos.
+    assert summary.aborted is None
+    assert finals(download.output) == []
+    assert_clean(download.output)
+
+
+def test_genuine_network_errors_keep_their_classification(download, sleeps):
+    drive = make_drive((media_item("red2", "producto.jpg", JPEG), JPEG))
+    drive.media_failures = [ConnectionResetError(), OSError("red inaccesible")]
+
+    summary = download(drive)
+
+    assert summary.items[0].status == downloads.DOWNLOADED
+    assert sleeps == [1.0, 2.0]
+
+
+# GD02-R2: correspondencia MIME/extensión ---------------------------------
+
+@pytest.mark.parametrize(
+    "name, mime",
+    [
+        ("producto.png", "image/jpeg"),
+        ("producto.jpg", "image/png"),
+        ("producto.jpeg", "image/webp"),
+        ("producto.webp", "image/png"),
+    ],
+)
+def test_mime_and_extension_must_correspond(download, name, mime):
+    drive = make_drive((media_item("mix", name, JPEG, mime), JPEG))
+
+    summary = download(drive)
+
+    assert summary.items[0].status == downloads.REJECTED
+    assert "no corresponde" in summary.items[0].reason
+    assert mime in summary.items[0].reason
+    assert drive.media_requests == []
+    assert finals(download.output) == []
+
+
+@pytest.mark.parametrize(
+    "name, data, mime",
+    [
+        ("a.jpg", JPEG, "image/jpeg"),
+        ("b.JPEG", JPEG, "image/jpeg"),
+        ("c.png", PNG, "image/png"),
+        ("d.WEBP", WEBP, "image/webp"),
+    ],
+)
+def test_matching_mime_and_extension_are_accepted(download, name, data, mime):
+    drive = make_drive((media_item("ok", name, data, mime), data))
+
+    assert download(drive).items[0].status == downloads.DOWNLOADED
+
+
+# GD02-R3: respuestas sin progreso ----------------------------------------
+
+def empty_chunk(total):
+    import httplib2
+
+    response = httplib2.Response({
+        "status": "206",
+        "content-range": f"bytes 0-999/{total}",
+    })
+    return response, b""
+
+
+def test_response_without_progress_is_aborted(download, sleeps):
+    data = noisy_png()
+    drive = make_drive((media_item("quieto", "quieto.png", data, "image/png"), data))
+    drive.media_failures = [empty_chunk(len(data))] * 100
+
+    summary = download(drive, chunk_size=1000)
+
+    item = summary.items[0]
+    assert item.status == downloads.FAILED
+    assert "sin progreso" in item.reason
+    assert len(drive.media_requests) == downloads.MAX_STALLED_CHUNKS
+    assert sleeps == []
+    assert finals(download.output) == []
+    assert_clean(download.output)
+
+
+def test_stall_after_partial_progress_is_aborted(download, sleeps):
+    data = noisy_png()
+    drive = make_drive((media_item("medio", "medio.png", data, "image/png"), data))
+    drive.media_failures = [None] + [empty_chunk(len(data))] * 100
+
+    summary = download(drive, chunk_size=1000)
+
+    assert summary.items[0].status == downloads.FAILED
+    assert len(drive.media_requests) == 1 + downloads.MAX_STALLED_CHUNKS
+    assert finals(download.output) == []
+    assert_clean(download.output)
+
+
+def test_transient_errors_do_not_count_as_stalls(download, sleeps):
+    data = noisy_png()
+    drive = make_drive((media_item("vale", "vale.png", data, "image/png"), data))
+    # Tres errores transitorios seguidos (dentro del límite de
+    # reintentos) no son "respuestas sin progreso".
+    drive.media_failures = [
+        None, http_error(503), http_error(503), ConnectionResetError(), None,
+    ]
+
+    summary = download(drive, chunk_size=1000)
+
+    assert summary.items[0].status == downloads.DOWNLOADED
+    assert (download.output / summary.items[0].local_name).read_bytes() == data
+    assert sleeps == [1.0, 2.0, 4.0]
+
+
+def test_endless_tiny_progress_is_bounded(download, sleeps):
+    import httplib2
+
+    data = noisy_png()
+    drive = make_drive((media_item("goteo", "goteo.png", data, "image/png"), data))
+    served = {"offset": 0}
+
+    def one_byte(file_id, number):
+        offset = served["offset"]
+        served["offset"] += 1
+        drive.media_failures.insert(0, (
+            httplib2.Response({
+                "status": "206",
+                "content-range": f"bytes {offset}-{offset}/{len(data)}",
+            }),
+            data[offset:offset + 1],
+        ))
+
+    drive.on_media = one_byte
+
+    summary = download(drive, chunk_size=1000)
+
+    assert summary.items[0].status == downloads.FAILED
+    assert "sin progreso" in summary.items[0].reason or "demasiados" in summary.items[0].reason
+    assert len(drive.media_requests) < len(data)
+    assert finals(download.output) == []

@@ -46,6 +46,7 @@ completa el registro.
 No se admiten descargas concurrentes sobre la misma carpeta local.
 """
 
+import errno
 import hashlib
 import json
 import os
@@ -83,6 +84,9 @@ MAX_DOWNLOAD_RETRIES = 4
 # Fallos de red seguidos que detienen el lote.
 MAX_CONSECUTIVE_TRANSIENT_FAILURES = 3
 
+# Respuestas exitosas seguidas sin datos nuevos que abortan una descarga.
+MAX_STALLED_CHUNKS = 3
+
 METADATA_DIR = ".drive"
 RECORD_SCHEMA_VERSION = 1
 GENERATOR = "drive-image-processor"
@@ -98,6 +102,13 @@ EXPECTED_FORMATS = {
     "image/jpeg": {"JPEG", "MPO"},
     "image/png": {"PNG"},
     "image/webp": {"WEBP"},
+}
+
+# Extensiones que corresponden a cada tipo MIME.
+EXTENSIONS_BY_MIME = {
+    "image/jpeg": {".jpg", ".jpeg"},
+    "image/png": {".png"},
+    "image/webp": {".webp"},
 }
 
 FILE_FIELDS = (
@@ -225,6 +236,24 @@ class _Rejected(Exception):
 
 class _Failed(Exception):
     """La descarga o la verificación falló: no se publica nada."""
+
+
+class _LocalWriteError(_Failed):
+    """
+    Error de E/S del disco local (no de la red): no se reintenta la
+    descarga ni cuenta como fallo de red.
+    """
+
+
+def _local_error_message(exc: OSError) -> str:
+    if exc.errno == errno.ENOSPC:
+        detail = "no queda espacio en el disco local"
+    elif isinstance(exc, PermissionError) or exc.errno in (errno.EACCES, errno.EPERM):
+        detail = "permiso denegado al escribir en la carpeta local"
+    else:
+        detail = f"no se pudo escribir en la carpeta local ({type(exc).__name__})"
+
+    return f"error local: {detail}."
 
 
 # Registros de procedencia ---------------------------------------------
@@ -372,11 +401,18 @@ def _check_metadata(meta: dict, file_id: str, max_bytes: int) -> dict:
     if not isinstance(name, str) or not name:
         raise _Rejected("metadatos incompletos")
 
+    extension = Path(name).suffix.lower()
+
     if (
         mime not in EXPECTED_FORMATS
-        or Path(name).suffix.lower() not in queries.SUPPORTED_EXTENSIONS
+        or extension not in queries.SUPPORTED_EXTENSIONS
     ):
         raise _Rejected("formato no admitido")
+
+    if extension not in EXTENSIONS_BY_MIME[mime]:
+        raise _Rejected(
+            f"la extensión {extension} no corresponde al tipo {mime}"
+        )
 
     size = _parse_size(meta.get("size"))
 
@@ -433,7 +469,13 @@ class _HashingWriter:
 
         self.md5.update(data)
         self.sha256.update(data)
-        return self.file.write(data)
+
+        try:
+            return self.file.write(data)
+        except OSError as exc:
+            # Disco lleno o permisos: no es un error de la red, aunque
+            # ocurra dentro de next_chunk().
+            raise _LocalWriteError(_local_error_message(exc)) from None
 
 
 def _verify_image(path: Path, mime: str) -> None:
@@ -491,9 +533,17 @@ def _download_to_temp(
             downloader = downloader_factory(writer, request, chunksize=chunk_size)
 
             retries = 0
+            stalled = 0
+            chunks = 0
+            # Cota de respuestas exitosas: el doble de los bloques
+            # esperados, para que ninguna respuesta anómala (por
+            # ejemplo, un byte por bloque) prolongue la descarga sin fin.
+            max_chunks = 2 * -(-info["size"] // chunk_size) + MAX_STALLED_CHUNKS
             done = False
 
             while not done:
+                received = writer.size
+
                 try:
                     _, done = downloader.next_chunk(num_retries=0)
                 except _Failed:
@@ -509,9 +559,35 @@ def _download_to_temp(
 
                     retries += 1
                     sleep(translated.retry_after or client.backoff(retries))
+                    continue
 
-            file.flush()
-            os.fsync(file.fileno())
+                if done:
+                    break
+
+                chunks += 1
+
+                if writer.size == received:
+                    stalled += 1
+
+                    if stalled >= MAX_STALLED_CHUNKS:
+                        raise _Failed(
+                            "Drive respondió sin progreso en la descarga; se "
+                            "abortó y se descartó el temporal."
+                        )
+                else:
+                    stalled = 0
+
+                if chunks >= max_chunks:
+                    raise _Failed(
+                        "Drive envió demasiados bloques para el tamaño "
+                        "declarado; se abortó y se descartó el temporal."
+                    )
+
+            try:
+                file.flush()
+                os.fsync(file.fileno())
+            except OSError as exc:
+                raise _LocalWriteError(_local_error_message(exc)) from None
 
         if writer.size != info["size"]:
             raise _Failed(
@@ -789,8 +865,7 @@ def download_folder(
         except OSError as exc:
             # Errores locales (disco lleno, permisos): sin publicar nada.
             item = DownloadItem(
-                image.id, image.name, FAILED,
-                reason=f"error local al guardar ({type(exc).__name__}).",
+                image.id, image.name, FAILED, reason=_local_error_message(exc)
             )
         except DriveAuthError as exc:
             summary.aborted = exc
