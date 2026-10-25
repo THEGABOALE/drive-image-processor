@@ -66,11 +66,12 @@ from .processing import (
 )
 
 
-def _connect(secrets_dir, interactive=False, profile=auth.READ):
+def _connect(secrets_dir, interactive=False, profile=auth.READ, persist=True):
     paths = auth.secret_paths(secrets_dir)
     notices = []
     credentials = auth.get_credentials(
-        paths, interactive=interactive, notices=notices, profile=profile
+        paths, interactive=interactive, notices=notices, profile=profile,
+        persist=persist,
     )
 
     for notice in notices:
@@ -481,10 +482,14 @@ def _command_upload(args) -> int:
     if not args.input.is_dir():
         raise ValueError(f"No existe la carpeta de resultados: {args.input}")
 
-    _, read_service = _connect(args.secrets_dir)
+    # La vista previa no modifica los tokens (ni al renovarlos).
+    persist = not args.dry_run
+    _, read_service = _connect(args.secrets_dir, persist=persist)
 
     try:
-        _, write_service = _connect(args.secrets_dir, profile=auth.WRITE)
+        _, write_service = _connect(
+            args.secrets_dir, profile=auth.WRITE, persist=persist
+        )
     except DriveAuthError as exc:
         if not args.dry_run:
             raise
@@ -556,6 +561,15 @@ def _command_upload(args) -> int:
     print(f"Fallidas:                   {summary.count(uploads.FAILED)}")
     print(f"Pendientes:                 {summary.count(uploads.UNCERTAIN)}")
     print(f"Bytes subidos:              {_format_size(summary.bytes_uploaded)}")
+
+    if args.dry_run:
+        access = {True: "verificado", False: "sin acceso", None: "no verificado"}
+        print(f"Permiso de escritura (drive.file): {access[summary.write_access]}")
+        print(f"\n[AVISO] {summary.write_access_note}")
+        print(
+            "La vista previa no garantiza que Google acepte la subida: los "
+            "permisos, la cuota o la carpeta pueden cambiar."
+        )
 
     if summary.count(uploads.UNCERTAIN):
         print(

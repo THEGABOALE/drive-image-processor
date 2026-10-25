@@ -99,6 +99,7 @@ from .errors import (
     DriveError,
     DriveNotFoundError,
     DriveResponseError,
+    DriveSecureConnectionError,
     DriveTransientError,
     DriveWriteAccessError,
 )
@@ -113,6 +114,9 @@ DEFAULT_CHUNK_SIZE = 4 * MIB
 
 # Reintentos de una subida (en total, siempre con el mismo ID).
 MAX_UPLOAD_RETRIES = 4
+
+# Respuestas parciales seguidas sin avance que detienen una subida.
+MAX_STALLED_CHUNKS = 3
 
 # Fallos de red seguidos que detienen el lote.
 MAX_CONSECUTIVE_TRANSIENT_FAILURES = 3
@@ -186,8 +190,10 @@ class UploadSummary:
     target: queries.DriveFolder | None = None
     items: list[UploadItem] = field(default_factory=list)
     aborted: DriveError | None = None
-    # True: se comprobó el acceso de escritura; None: no se comprobó.
+    # True: hay acceso de escritura al destino; False: no lo hay (solo
+    # en la vista previa); None: no se comprobó.
     write_access: bool | None = None
+    write_access_note: str | None = None
 
     def count(self, status: str) -> int:
         return sum(item.status == status for item in self.items)
@@ -231,6 +237,13 @@ class _Failed(Exception):
 
 class _AlreadyCreated(Exception):
     """Drive respondió 409: el ID preasignado ya tiene un archivo."""
+
+
+class UploadStalledError(DriveTransientError):
+    """
+    La subida reanudable dejó de avanzar o envió demasiadas respuestas
+    parciales. No se reintenta: queda incierta, con su ID reservado.
+    """
 
 
 # Selección local --------------------------------------------------------
@@ -689,11 +702,56 @@ def _remote_problem(remote: dict, name: str | None, ctx: _Context, expected: dic
     return None
 
 
+def _send_chunks(request, size: int, chunk_size: int) -> None:
+    """
+    Envía la subida bloque a bloque hasta la respuesta final.
+
+    Una respuesta parcial (308) normal informa más bytes recibidos que
+    la anterior. Sin avance (o sin estado) MAX_STALLED_CHUNKS veces
+    seguidas, o con más respuestas parciales de las que permite el
+    tamaño, se detiene con UploadStalledError: nunca queda en un ciclo
+    sin fin.
+    """
+    # El doble de los bloques esperados, más el margen sin avance.
+    max_partial = 2 * -(-size // chunk_size) + MAX_STALLED_CHUNKS
+    received = 0
+    stalled = 0
+    partial = 0
+
+    while True:
+        status, response = request.next_chunk(num_retries=0)
+
+        if response is not None:
+            return
+
+        partial += 1
+        progress = getattr(status, "resumable_progress", None)
+
+        if isinstance(progress, int) and received < progress <= size:
+            received = progress
+            stalled = 0
+        else:
+            stalled += 1
+
+            if stalled >= MAX_STALLED_CHUNKS:
+                raise UploadStalledError(
+                    "Drive respondió sin progreso en la subida; se detuvo "
+                    "sin crear otro archivo."
+                )
+
+        if partial >= max_partial:
+            raise UploadStalledError(
+                "Drive envió demasiadas respuestas parciales para el "
+                "tamaño del PNG; se detuvo sin crear otro archivo."
+            )
+
+
 def _send(ctx: _Context, body: dict, data: bytes) -> None:
     """
-    Crea el archivo con el ID preasignado del cuerpo. Los reintentos
-    reinician la sesión con el mismo ID: si un intento anterior llegó
-    a Drive, la respuesta es 409 (_AlreadyCreated) y no hay duplicado.
+    Crea el archivo con el ID preasignado del cuerpo. Los errores
+    reintentables reinician la sesión con el mismo ID: si un intento
+    anterior llegó a Drive, la respuesta es 409 (_AlreadyCreated) y no
+    hay duplicado. Una subida sin progreso no se reintenta.
     """
     retries = 0
 
@@ -701,10 +759,11 @@ def _send(ctx: _Context, body: dict, data: bytes) -> None:
         request = _create_request(ctx.write, body, data, ctx.chunk_size)
 
         try:
-            response = None
-            while response is None:
-                _, response = request.next_chunk(num_retries=0)
+            _send_chunks(request, len(data), ctx.chunk_size)
             return
+
+        except DriveError:
+            raise
 
         except Exception as exc:
             if isinstance(exc, HttpError) and exc.status_code == 409:
@@ -789,7 +848,7 @@ def _create_and_verify(ctx, candidate, data, expected, remote_id, name, path) ->
         _send(ctx, body, data)
     except _AlreadyCreated:
         pass
-    except DriveCertificateError:
+    except DriveSecureConnectionError:
         raise
     except DriveTransientError as exc:
         # Respuesta ambigua: ¿llegó a Drive? Se consulta el ID reservado.
@@ -1040,9 +1099,38 @@ def upload_results(
         dry_run=dry_run,
     )
 
-    if write_service is not None:
+    if write_service is not None and not dry_run:
+        # Subida real: sin acceso comprobado no se crea nada.
         _check_write_access(ctx)
         summary.write_access = True
+
+    elif write_service is not None:
+        # Vista previa: el acceso se informa, no se exige.
+        try:
+            _check_write_access(ctx)
+        except (DriveWriteAccessError, DriveAuthError) as exc:
+            summary.write_access = False if isinstance(exc, DriveWriteAccessError) else None
+            summary.write_access_note = (
+                f"{exc} La subida real se detendría sin subir nada."
+                if summary.write_access is False
+                else f"El permiso de escritura no se verificó: {exc}"
+            )
+            # Sin acceso de escritura, las consultas usan la de lectura.
+            ctx.own = read_service
+        else:
+            summary.write_access = True
+            summary.write_access_note = (
+                "La autorización drive.file tiene acceso a la carpeta de "
+                "destino. Aun así, la vista previa no garantiza que Google "
+                "acepte la subida."
+            )
+
+    else:
+        summary.write_access_note = (
+            "El permiso de escritura no se verificó: no hay una "
+            f"autorización drive.file válida ({AUTH_WRITE_COMMAND}). La "
+            "vista previa no garantiza que Google acepte la subida."
+        )
 
     # Todos los nombres del destino, también los ajenos (credencial de lectura).
     ctx.names = {
@@ -1079,7 +1167,7 @@ def upload_results(
                 reason=f"error local ({type(exc).__name__}); no se subió el PNG.",
                 **base,
             )
-        except (DriveAuthError, DriveAccessError, DriveCertificateError) as exc:
+        except (DriveAuthError, DriveAccessError, DriveSecureConnectionError) as exc:
             # Afectan a todo el lote: se detiene.
             report(UploadItem(status=FAILED, reason=str(exc), **base))
             summary.aborted = exc

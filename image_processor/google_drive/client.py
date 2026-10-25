@@ -10,8 +10,14 @@ execute() clasifica las respuestas:
   exponencial (o la indicada por Retry-After); luego
   DriveRateLimitError o DriveTransientError.
 - Fallos de red: los mismos reintentos; luego DriveNetworkError.
-  Un certificado SSL inválido no se reintenta y la verificación
-  nunca se desactiva.
+- TLS: un certificado inválido (DriveCertificateError) o una
+  negociación TLS fallida (DriveSecureConnectionError) no se
+  reintentan, aunque lleguen encadenados o envueltos por el
+  transporte (TransportError de google-auth, requests o urllib3). La
+  verificación nunca se desactiva. Un corte de una conexión TLS ya
+  establecida (EOF) sí se reintenta.
+
+Los mensajes nunca incluyen el texto de la excepción original.
 """
 
 import logging
@@ -20,6 +26,7 @@ import time
 from dataclasses import dataclass
 
 import httplib2
+import requests
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -32,6 +39,7 @@ from .errors import (
     DriveNetworkError,
     DriveNotFoundError,
     DriveRateLimitError,
+    DriveSecureConnectionError,
     DriveTransientError,
 )
 
@@ -44,6 +52,29 @@ MAX_DELAY_SECONDS = 32.0
 
 TRANSIENT_STATUSES = {429, 500, 502, 503, 504}
 RATE_LIMIT_REASONS = {"rateLimitExceeded", "userRateLimitExceeded"}
+
+# Cortes de una conexión TLS ya establecida: temporales.
+_TRANSIENT_TLS_ERRORS = (
+    ssl.SSLEOFError,
+    ssl.SSLZeroReturnError,
+    ssl.SSLSyscallError,
+    ssl.SSLWantReadError,
+    ssl.SSLWantWriteError,
+)
+
+# Límite de excepciones revisadas en una cadena.
+_MAX_CHAIN = 32
+
+_CERTIFICATE_MESSAGE = (
+    "No se pudo verificar el certificado SSL de Google. Revise la red "
+    "(por ejemplo, un proxy que intercepta HTTPS). La verificación no "
+    "se desactiva."
+)
+
+_HANDSHAKE_MESSAGE = (
+    "No se pudo establecer una conexión segura (TLS) con Google. Revise "
+    "la red o el proxy. No se reintenta y la verificación no se desactiva."
+)
 
 
 def build_service(credentials):
@@ -78,6 +109,68 @@ def _retry_after(error: HttpError) -> float | None:
         return None
 
     return min(max(value, 0.0), MAX_DELAY_SECONDS)
+
+
+def _chain(exc: BaseException):
+    """
+    La excepción y las que la originaron: encadenadas (__cause__,
+    __context__), recibidas como argumento (TransportError, requests)
+    o como motivo (urllib3 MaxRetryError.reason).
+    """
+    pending = [exc]
+    seen = set()
+
+    while pending and len(seen) < _MAX_CHAIN:
+        current = pending.pop(0)
+
+        if id(current) in seen:
+            continue
+
+        seen.add(id(current))
+        yield current
+
+        linked = [
+            current.__cause__,
+            current.__context__,
+            getattr(current, "reason", None),
+            *getattr(current, "args", ()),
+        ]
+        pending.extend(item for item in linked if isinstance(item, BaseException))
+
+
+def _secure_connection_failure(exc: BaseException) -> str | None:
+    """
+    "certificate", "handshake" o None. Solo se examina la cadena; su
+    texto nunca se muestra.
+    """
+    legacy_handshake = getattr(httplib2, "SSLHandshakeError", None)
+    handshake = False
+    transient = False
+
+    for item in _chain(exc):
+        if isinstance(item, ssl.SSLCertVerificationError):
+            return "certificate"
+
+        if isinstance(item, _TRANSIENT_TLS_ERRORS):
+            transient = True
+
+        elif isinstance(item, ssl.SSLError):
+            detail = " ".join(
+                str(part) for part in (getattr(item, "reason", None), *item.args)
+            )
+            if "CERTIFICATE_VERIFY_FAILED" in detail:
+                return "certificate"
+            handshake = True
+
+        elif isinstance(item, requests.exceptions.SSLError) or (
+            legacy_handshake is not None and isinstance(item, legacy_handshake)
+        ):
+            handshake = True
+
+    if handshake and not transient:
+        return "handshake"
+
+    return None
 
 
 def backoff(attempt: int) -> float:
@@ -154,14 +247,16 @@ def translate_error(exc: BaseException) -> TranslatedError | None:
             retryable=False,
         )
 
-    if isinstance(exc, ssl.SSLCertVerificationError):
+    failure = _secure_connection_failure(exc)
+
+    if failure == "certificate":
         return TranslatedError(
-            DriveCertificateError(
-                "No se pudo verificar el certificado SSL de Google. "
-                "Revise la red (por ejemplo, un proxy que intercepta "
-                "HTTPS). La verificación no se desactiva."
-            ),
-            retryable=False,
+            DriveCertificateError(_CERTIFICATE_MESSAGE), retryable=False
+        )
+
+    if failure == "handshake":
+        return TranslatedError(
+            DriveSecureConnectionError(_HANDSHAKE_MESSAGE), retryable=False
         )
 
     if isinstance(

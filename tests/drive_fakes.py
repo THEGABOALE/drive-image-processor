@@ -21,6 +21,7 @@ import re
 
 import httplib2
 from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaUploadProgress
 
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -221,24 +222,55 @@ def folder(file_id, name, parents=("root",)):
 
 # GD-03B: escritura con drive.file ---------------------------------------
 
+# Llamadas a next_chunk por vista a partir de las cuales la prueba
+# falla en lugar de quedar en un ciclo sin fin.
+MAX_FAKE_CHUNK_CALLS = 500
+
+
 class FakeUploadRequest:
     """
-    files.create con subida reanudable. upload_failures de la vista
-    define cada intento: una excepción (antes de llegar a Drive),
-    "lost" (Drive crea el archivo y la respuesta se pierde) o None.
+    files.create con subida reanudable (una sesión por solicitud).
+
+    En cada llamada a next_chunk, upload_failures de la vista define
+    el resultado: una excepción (antes de llegar a Drive), "lost"
+    (Drive crea el archivo y la respuesta se pierde) o None.
+
+    chunk_responses fuerza respuestas parciales anómalas: un entero es
+    un 308 con ese progreso y "none" una respuesta sin estado. Con
+    chunked=True, cada llamada envía un bloque de chunksize bytes y
+    responde 308 con el progreso real hasta completar la subida.
     """
 
     def __init__(self, view, kwargs):
         self.view = view
         self.kwargs = kwargs
+        self.sent = 0
+        view.upload_sessions.append(kwargs["body"].get("id"))
 
     def next_chunk(self, num_retries=0):
         view = self.view
         view.upload_attempts.append(self.kwargs["body"].get("id"))
+
+        if len(view.upload_attempts) > MAX_FAKE_CHUNK_CALLS:
+            raise AssertionError("la subida no termina: ciclo sin fin")
+
         failure = view.upload_failures.pop(0) if view.upload_failures else None
 
         if isinstance(failure, BaseException):
             raise failure
+
+        media = self.kwargs["media_body"]
+
+        if view.chunk_responses:
+            progress = view.chunk_responses.pop(0)
+            if progress == "none":
+                return None, None
+            return MediaUploadProgress(progress, media.size()), None
+
+        if view.chunked:
+            self.sent = min(self.sent + media.chunksize(), media.size())
+            if self.sent < media.size():
+                return MediaUploadProgress(self.sent, media.size()), None
 
         created = view.server.create(self.kwargs)
 
@@ -260,6 +292,9 @@ class _View:
         self.failures = []
         self.upload_failures = []
         self.upload_attempts = []
+        self.upload_sessions = []
+        self.chunk_responses = []
+        self.chunked = False
 
     # La descarga (solo lectura) usa el contenido del servidor.
     @property

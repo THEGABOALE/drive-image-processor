@@ -1028,3 +1028,195 @@ def test_cli_auth_write_reports_the_minimal_scope(cli_world, capsys):
     out = capsys.readouterr().out
     assert "drive.file" in out
     assert cli_world.paths.token.read_bytes() == read_token
+
+
+# GD03B-R1: subidas reanudables sin progreso -------------------------------
+
+def local_png(world, file_id):
+    return (world.outputs / world.entry(file_id).output_name).read_bytes()
+
+
+def test_partial_progress_completes_the_upload(world):
+    world.add("1Bloques", "producto.jpg")
+    world.prepare()
+    world.server.write.chunked = True
+    data = local_png(world, "1Bloques")
+    assert len(data) > 4 * 256
+
+    summary = world.upload(chunk_size=256)
+
+    item = summary.items[0]
+    assert item.status == uploads.UPLOADED
+    assert len(world.server.write.upload_attempts) == -(-len(data) // 256)
+    assert world.server.write.upload_sessions == [item.remote_id]
+    assert world.server.media[item.remote_id] == data
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        pytest.param([0] * 50, id="sin-progreso"),
+        pytest.param(["none"] * 50, id="sin-estado"),
+        pytest.param([300, 200, 200, 200] + [200] * 50, id="retroceso"),
+    ],
+)
+def test_upload_without_progress_stops_and_stays_recoverable(world, responses):
+    world.add("1Quieta", "producto.jpg")
+    world.prepare()
+    world.server.write.chunk_responses = list(responses)
+
+    summary = world.upload(chunk_size=256)
+
+    item = summary.items[0]
+    assert item.status == uploads.UNCERTAIN
+    assert "sin progreso" in item.reason
+    assert not summary.complete
+    assert len(world.server.write.upload_attempts) <= uploads.MAX_STALLED_CHUNKS + 1
+    # Ni reintentos a ciegas ni un ID nuevo: el registro sigue pendiente.
+    assert world.server.write.upload_sessions == [item.remote_id]
+    assert world.server.created == []
+    assert world.sleeps == []
+    ledger = world.ledger("1Quieta")
+    assert ledger["status"] == "pending"
+    assert world.server.generated == [ledger["remote_id"]]
+
+    world.server.write.chunk_responses = []
+    again = world.upload(chunk_size=256)
+
+    assert again.items[0].status == uploads.UPLOADED
+    assert again.items[0].remote_id == ledger["remote_id"]
+    assert world.server.generated == [ledger["remote_id"]]
+
+
+def test_endless_tiny_progress_is_bounded(world):
+    world.add("1Goteo", "producto.jpg")
+    world.prepare()
+    size = len(local_png(world, "1Goteo"))
+    world.server.write.chunk_responses = list(range(1, 400))
+
+    summary = world.upload(chunk_size=256)
+
+    item = summary.items[0]
+    assert item.status == uploads.UNCERTAIN
+    assert "demasiadas respuestas parciales" in item.reason
+    assert len(world.server.write.upload_attempts) <= 2 * -(-size // 256) + uploads.MAX_STALLED_CHUNKS
+    assert world.server.created == []
+    assert world.ledger("1Goteo")["status"] == "pending"
+
+
+def test_retryable_error_between_chunks_restarts_with_the_same_id(world):
+    world.add("1Corte503", "producto.jpg")
+    world.prepare()
+    world.server.write.chunked = True
+    world.server.write.upload_failures = [None, http_error(503)]
+
+    summary = world.upload(chunk_size=256)
+
+    item = summary.items[0]
+    assert item.status == uploads.UPLOADED
+    assert world.server.write.upload_sessions == [item.remote_id] * 2
+    assert world.sleeps == [1.0]
+    assert world.server.media[item.remote_id] == local_png(world, "1Corte503")
+
+
+def test_stalled_uploads_count_as_network_failures(world):
+    for index in range(5):
+        world.add(f"1Lenta{index}", f"foto{index}.jpg")
+    world.prepare()
+    world.server.write.chunk_responses = [0] * 400
+
+    summary = world.upload(chunk_size=256)
+
+    assert summary.aborted is not None
+    assert summary.count(uploads.UNCERTAIN) == uploads.MAX_CONSECUTIVE_TRANSIENT_FAILURES
+    assert world.server.created == []
+
+
+# GD03B-R3: vista previa sin exigir acceso de escritura ---------------------
+
+def test_dry_run_with_write_token_reports_missing_folder_access(world):
+    world.add("1VistaBloq", "producto.jpg")
+    world.prepare()
+
+    summary = world.upload(dry_run=True, target_folder_id=LOCKED)
+
+    assert [item.status for item in summary.items] == [uploads.PLANNED]
+    assert summary.write_access is False
+    assert "drive.file" in summary.write_access_note
+    assert not {"files.create", "files.generateIds"} & set(write_calls(world))
+    assert world.server.generated == [] and world.server.created == []
+    assert not (world.outputs / uploads.LEDGER_DIR).exists()
+
+
+def test_dry_run_without_write_token_on_a_locked_folder(world):
+    world.add("1VistaSinToken", "producto.jpg")
+    world.prepare()
+
+    summary = uploads.upload_results(
+        world.server.read, None, world.outputs, FOLDER, target_folder_id=LOCKED,
+        dry_run=True, sleep=world.sleeps.append, execute=world.execute,
+    )
+
+    assert [item.status for item in summary.items] == [uploads.PLANNED]
+    assert summary.write_access is None
+    assert "no se verificó" in summary.write_access_note
+    assert world.server.write.calls == []
+    assert not (world.outputs / uploads.LEDGER_DIR).exists()
+
+
+def test_dry_run_with_access_reports_it_as_verified_but_not_guaranteed(world):
+    world.add("1VistaOk", "producto.jpg")
+    world.prepare()
+
+    summary = world.upload(dry_run=True)
+
+    assert summary.write_access is True
+    assert "no garantiza" in summary.write_access_note
+
+
+def test_real_upload_still_checks_access_before_creating(world):
+    world.add("1RealBloq", "producto.jpg")
+    world.prepare()
+    world.upload(dry_run=True, target_folder_id=LOCKED)
+
+    with pytest.raises(DriveWriteAccessError):
+        world.upload(target_folder_id=LOCKED)
+
+    assert world.server.generated == [] and world.server.created == []
+
+
+def test_cli_dry_run_on_a_locked_folder(cli_world, capsys):
+    cli_world.add("1CliVistaBloq", "producto.jpg")
+    cli_world.prepare()
+
+    assert upload_cli(cli_world, "--dry-run", "--target-folder-id", LOCKED) == 0
+    out = capsys.readouterr().out
+    assert "sin acceso" in out and "no garantiza" in out
+
+    cli_world.paths.write_token.unlink()
+    assert upload_cli(cli_world, "--dry-run", "--target-folder-id", LOCKED) == 0
+    assert "no verificado" in capsys.readouterr().out
+    assert upload_cli(cli_world, "--target-folder-id", LOCKED) == 3
+
+
+def test_cli_dry_run_never_modifies_the_tokens(cli_world, monkeypatch):
+    cli_world.add("1CliTokens", "producto.jpg")
+    cli_world.prepare()
+    past = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
+    for scopes, path in (
+        ([auth.READONLY_SCOPE], cli_world.paths.token),
+        ([auth.WRITE_SCOPE], cli_world.paths.write_token),
+    ):
+        expired = make_credentials(scopes)
+        expired.expiry = past
+        auth.save_token(expired, path)
+    before = (cli_world.paths.token.read_bytes(), cli_world.paths.write_token.read_bytes())
+
+    def refresh(self, request):
+        self.token = "ya29.RENOVADO"
+        self.expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
+
+    monkeypatch.setattr(Credentials, "refresh", refresh)
+
+    assert upload_cli(cli_world, "--dry-run") == 0
+    assert (cli_world.paths.token.read_bytes(), cli_world.paths.write_token.read_bytes()) == before

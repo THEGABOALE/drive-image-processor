@@ -48,7 +48,14 @@ class DriveNetworkError(DriveTransientError):
     """No se pudo comunicar con Google."""
 
 
-class DriveCertificateError(DriveNetworkError):
+class DriveSecureConnectionError(DriveNetworkError):
+    """
+    No se pudo establecer la conexión segura (TLS) con Google: no se
+    reintenta y la verificación nunca se desactiva.
+    """
+
+
+class DriveCertificateError(DriveSecureConnectionError):
     """Certificado SSL inválido: no se reintenta ni se desactiva."""
 
 

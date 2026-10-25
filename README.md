@@ -268,7 +268,10 @@ de red o límite de solicitudes después de los reintentos.
 Los errores 429, 5xx, de cuota y de red se reintentan hasta 5 veces con
 espera exponencial (1, 2, 4 y 8 segundos, o la indicada por Google).
 Los errores de autorización y de permisos no se reintentan. La
-verificación SSL nunca se desactiva.
+verificación SSL nunca se desactiva: un certificado inválido o una
+negociación TLS fallida no se reintentan, aunque lleguen envueltos por
+el transporte (google-auth, requests o urllib3). Un corte de una
+conexión TLS ya establecida sí se reintenta.
 
 Durante la autorización en el navegador (`auth`), los errores de
 conexión, de tiempo de espera o de certificado SSL al intercambiar el
@@ -466,6 +469,10 @@ del procesamiento y la carpeta de destino. Se guarda en las
 4. Si la respuesta se pierde y no se puede confirmar, la subida queda
    **incierta** (código 6). La siguiente ejecución consulta el ID
    reservado: confirma el archivo o lo crea con ese mismo ID.
+5. Cada respuesta parcial de la subida reanudable debe informar más
+   bytes recibidos. Tres respuestas seguidas sin avance (o sin estado),
+   o más respuestas parciales de las que permite el tamaño, detienen la
+   subida sin reintentarla: queda incierta, con su ID reservado.
 
 Un PNG registrado que ya no existe en Drive (o está en la papelera) no
 se vuelve a subir automáticamente. Para subirlo de nuevo, borre su
@@ -482,7 +489,13 @@ lo informa) e identidad. Un PNG que no coincide queda registrado como
 no coincidente y nunca se da por completado ni se vuelve a crear.
 
 **Vista previa y límite.** `--dry-run` no escribe nada en Drive ni en
-disco; funciona también sin autorización de escritura. `--limit` es
+disco, no crea archivos ni IDs y no modifica los tokens (si hay que
+renovarlos, la renovación queda solo en memoria). No exige acceso de
+escritura al destino: informa si el permiso `drive.file` está
+verificado, si falta acceso a la carpeta (la subida real se detendría)
+o si no se pudo verificar (sin autorización de escritura). Una vista
+previa no garantiza que Google acepte la subida. La subida real sigue
+comprobando el acceso antes de `files.create`. `--limit` es
 obligatorio. El resumen muestra las subidas, las verificadas
 previamente, las rechazadas, las fallidas y las pendientes (inciertas).
 

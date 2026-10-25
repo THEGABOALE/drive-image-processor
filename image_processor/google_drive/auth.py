@@ -361,10 +361,14 @@ def get_credentials(
     request_factory=Request,
     notices: list[str] | None = None,
     profile: AuthProfile = READ,
+    persist: bool = True,
 ):
     """
     Credenciales válidas para Drive con la autorización profile
     (READ por defecto, o WRITE). Cada una usa solo su token.
+
+    persist=False renueva el token solo en memoria: el archivo no
+    cambia (vista previa).
 
     1. Reutiliza el token guardado si es válido.
     2. Si expiró y tiene token de actualización, lo renueva y lo
@@ -416,7 +420,8 @@ def get_credentials(
         except TransportError as exc:
             raise _network_error(exc, "renovar la autorización") from None
         else:
-            save_token(credentials, token_path)
+            if persist:
+                save_token(credentials, token_path)
             return credentials
 
     if not interactive:
