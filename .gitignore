@@ -13,10 +13,17 @@ outputs/
 .env.*
 !.env.example
 
-# Credenciales de Google
+# Credenciales de Google (OAuth)
 .secrets/
 credentials.json
 token.json
+client_secret*.json
+credentials*.json
+token*.json
+*.token.json
+
+# Temporales (incluidas copias de tokens a medio escribir)
+*.tmp
 
 # Sistema operativo
 .DS_Store

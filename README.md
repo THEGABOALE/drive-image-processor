@@ -194,6 +194,85 @@ Limitaciones:
 - Una entrada `pending` creada por la versión anterior del manifiesto
   (sin SHA-256) no permite recuperar su PNG: queda sin verificar.
 
+## Google Drive (GD-01: solo lectura)
+
+Esta etapa solo autoriza la cuenta y consulta metadatos: no descarga,
+procesa, sube, modifica ni elimina archivos de Drive. El procesador
+local no depende de esta integración.
+
+### Configuración de Google Cloud
+
+1. En [Google Cloud Console](https://console.cloud.google.com/), cree o
+   elija un proyecto.
+2. En **APIs y servicios > Biblioteca**, habilite **Google Drive API**.
+3. En **Google Auth Platform > Público** (pantalla de consentimiento
+   OAuth), configure la aplicación como **Externa** en modo **Prueba** y
+   agregue como usuario de prueba la cuenta de Google que va a usar.
+4. En **Acceso a los datos**, agregue el scope
+   `https://www.googleapis.com/auth/drive.readonly`.
+5. En **Clientes**, cree un cliente OAuth de tipo **Aplicación de
+   escritorio** y descargue su JSON.
+6. Guárdelo como `.secrets/client_secret.json` en la carpeta desde la
+   que ejecutará los comandos. `.secrets/` está excluida de Git.
+
+La carpeta de secretos puede cambiarse con `--secrets-dir` o con la
+variable de entorno `DRIVE_IMAGE_PROCESSOR_SECRETS_DIR`. Allí se
+guarda también `token.json`, con el token de acceso y de
+actualización. Ninguno de los dos archivos debe compartirse ni
+confirmarse en Git.
+
+### Comandos
+
+```
+python -m image_processor.drive_cli auth
+python -m image_processor.drive_cli list-folders
+python -m image_processor.drive_cli list-images --folder-id ID
+python -m image_processor.drive_cli list-images --folder-id ID --originals-only --show-skipped
+python -m image_processor.drive_cli logout
+```
+
+- `auth` abre el navegador para autorizar la cuenta (solo si no hay una
+  autorización válida), guarda el token y verifica la conexión.
+- `list-folders` muestra el ID, el nombre y la carpeta superior de cada
+  carpeta accesible, y marca los nombres repetidos: las carpetas se
+  identifican siempre por su ID.
+- `list-images` lista las imágenes de una carpeta, sin entrar en
+  subcarpetas, con su ID, nombre, tipo MIME, tamaño, fecha de
+  modificación y MD5 de Drive. Recorre todas las páginas de resultados.
+  Solo incluye archivos cuyo tipo MIME y extensión son JPEG, PNG o
+  WebP. `--originals-only` excluye los resultados `TRANSFORMADA_`.
+- `logout` elimina el token local. Para revocar el acceso en Google,
+  use **Cuenta de Google > Seguridad > Aplicaciones de terceros**.
+
+Los comandos de consulta nunca abren el navegador: si no hay una
+autorización válida, indican que se ejecute `auth`.
+
+Códigos de salida: 0 correcto, 1 error inesperado de Drive, 2
+argumentos inválidos, 3 autorización ausente, expirada, revocada o
+insuficiente, 4 sin permiso, inexistente o no es una carpeta, 5 error
+de red o límite de solicitudes después de los reintentos.
+
+Los errores 429, 5xx, de cuota y de red se reintentan hasta 5 veces con
+espera exponencial (1, 2, 4 y 8 segundos, o la indicada por Google).
+Los errores de autorización y de permisos no se reintentan. La
+verificación SSL nunca se desactiva.
+
+### Permisos y riesgos
+
+- `drive.readonly` permite leer **todos** los archivos de la cuenta.
+  Google lo clasifica como scope **restringido**: sirve para esta prueba
+  local con una cuenta agregada como usuario de prueba, pero una
+  aplicación pública que lo use puede requerir la verificación de
+  Google y una evaluación de seguridad.
+- En modo de prueba, Google puede hacer que el token de actualización
+  expire a los pocos días. En ese caso basta con ejecutar `auth` de
+  nuevo.
+- El scope mínimo de producción (`drive.file` con Google Picker) se
+  estudiará más adelante. Con `drive.file`, la aplicación solo accede a
+  los archivos que crea o que el usuario selecciona: elegir una carpeta
+  no garantiza acceso a todos los archivos que ya contiene.
+- No se usan cuentas de servicio: la autorización es siempre personal.
+
 ## Estado
 
 Prototipo en desarrollo.
@@ -206,7 +285,6 @@ Prototipo en desarrollo.
 
 ## Próximas integraciones
 
-- rembg
-- Google Drive API
+- Google Drive API: descarga, procesamiento y subida de resultados
 - FastAPI
 - Next.js
