@@ -1,9 +1,12 @@
 """
 Simulación de Google Drive API v3 para las pruebas (sin red).
 
-Solo existen about.get, files.list y files.get: cualquier otra
-operación (crear, actualizar, eliminar, copiar, descargar...)
-lanza AssertionError.
+Solo existen about.get, files.list, files.get y files.get_media
+(descarga del contenido, que nunca modifica Drive): cualquier otra
+operación (crear, actualizar, eliminar, copiar, exportar...) lanza
+AssertionError.
+
+La descarga se sirve por rangos HTTP a MediaIoBaseDownload real.
 """
 
 import copy
@@ -16,7 +19,7 @@ from googleapiclient.errors import HttpError
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
-ALLOWED = {"files": {"list", "get"}, "about": {"get"}}
+ALLOWED = {"files": {"list", "get", "get_media"}, "about": {"get"}}
 
 
 def http_error(status, reasons=(), headers=None):
@@ -50,6 +53,46 @@ class FakeRequest:
         return copy.deepcopy(self.drive.respond(self.operation, self.kwargs))
 
 
+class FakeHttp:
+    """Sirve el contenido por rangos, como Drive con alt=media."""
+
+    def __init__(self, drive, file_id):
+        self.drive = drive
+        self.file_id = file_id
+
+    def request(self, uri, method="GET", headers=None, **kwargs):
+        headers = headers or {}
+        self.drive.media_requests.append((self.file_id, headers.get("range")))
+
+        if self.drive.on_media is not None:
+            self.drive.on_media(self.file_id, len(self.drive.media_requests))
+
+        if self.drive.media_failures:
+            failure = self.drive.media_failures.pop(0)
+            if isinstance(failure, BaseException):
+                raise failure
+            if failure is not None:
+                return failure
+
+        content = self.drive.media[self.file_id]
+        match = re.fullmatch(r"bytes=(\d+)-(\d+)", headers.get("range", ""))
+        start, end = (int(match[1]), int(match[2])) if match else (0, len(content) - 1)
+        end = min(end, len(content) - 1)
+
+        response = httplib2.Response({
+            "status": "206",
+            "content-range": f"bytes {start}-{end}/{len(content)}",
+        })
+        return response, content[start:end + 1]
+
+
+class FakeMediaRequest:
+    def __init__(self, drive, file_id):
+        self.uri = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+        self.headers = {}
+        self.http = FakeHttp(drive, file_id)
+
+
 class FakeResource:
     def __init__(self, drive, kind):
         self._drive = drive
@@ -64,6 +107,10 @@ class FakeResource:
         def call(**kwargs):
             operation = f"{self._kind}.{method}"
             self._drive.calls.append((operation, kwargs))
+
+            if operation == "files.get_media":
+                return FakeMediaRequest(self._drive, kwargs["fileId"])
+
             return FakeRequest(self._drive, operation, kwargs)
 
         return call
@@ -87,6 +134,13 @@ class FakeDrive:
         self.executions = []
         # Excepciones que se lanzan, en orden, antes de responder.
         self.failures = []
+        # Contenido descargable por fileId y fallos de cada petición
+        # HTTP de descarga (None: responder normalmente).
+        self.media = {}
+        self.media_failures = []
+        self.media_requests = []
+        # Función opcional llamada antes de servir cada bloque.
+        self.on_media = None
 
         for folder in self.folders:
             self.items.setdefault(

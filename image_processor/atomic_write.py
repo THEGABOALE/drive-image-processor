@@ -66,6 +66,16 @@ def _publish_no_overwrite(tmp: Path, final: Path) -> None:
     _publish_once(tmp, final)
 
 
+def publish_file_exclusive(tmp: Path, final: Path) -> None:
+    """
+    Publica un temporal ya escrito y verificado (en la misma carpeta)
+    con el nombre final, sin sobrescribir: si el destino existe, lanza
+    FileExistsError y el temporal queda para que lo elimine quien lo
+    creó.
+    """
+    _publish_no_overwrite(Path(tmp), Path(final))
+
+
 def save_png_exclusive(
     image: Image.Image,
     final_path: Path,

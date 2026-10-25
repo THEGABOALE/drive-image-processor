@@ -194,11 +194,12 @@ Limitaciones:
 - Una entrada `pending` creada por la versión anterior del manifiesto
   (sin SHA-256) no permite recuperar su PNG: queda sin verificar.
 
-## Google Drive (GD-01: solo lectura)
+## Google Drive (solo lectura)
 
-Esta etapa solo autoriza la cuenta y consulta metadatos: no descarga,
-procesa, sube, modifica ni elimina archivos de Drive. El procesador
-local no depende de esta integración.
+La integración autoriza la cuenta, consulta metadatos (GD-01) y
+descarga imágenes a una carpeta local (GD-02). Nunca sube, modifica ni
+elimina archivos de Drive. El procesador local no depende de esta
+integración.
 
 ### Configuración de Google Cloud
 
@@ -269,6 +270,78 @@ conexión, de tiempo de espera o de certificado SSL al intercambiar el
 código por los tokens se informan con un mensaje claro (código 5). El
 flujo interactivo no se reintenta automáticamente: basta con volver a
 ejecutar `auth`.
+
+### Descarga de imágenes (GD-02)
+
+```
+python -m image_processor.drive_cli download --folder-id ID --output downloads/prueba --limit 5
+python -m image_processor.drive_cli download --folder-id ID --output downloads/prueba --originals-only --max-file-mb 25 --show-skipped
+```
+
+Descarga las imágenes JPEG, PNG y WebP que están directamente en la
+carpeta (sin subcarpetas). `--limit` cuenta las imágenes elegibles
+(descargadas o ya verificadas), en orden por nombre. El resumen
+muestra las descargadas, las ya verificadas y omitidas, las rechazadas
+por motivo, las fallidas y el total de bytes. Código de salida 6: alguna
+imagen no se pudo descargar o verificar. Si fallan 3 imágenes seguidas
+por la red, el lote se detiene (código 5).
+
+**Nombres locales.** `<nombre saneado>--<fileId codificado><ext>`, por
+ejemplo `producto--1~ab~c-_9.jpg`:
+
+- El `fileId` siempre forma parte del nombre, así que dos archivos de
+  Drive con el mismo nombre nunca chocan.
+- Cada mayúscula del `fileId` se escribe como `~` y la minúscula
+  (`A` -> `~a`). La codificación es reversible y no choca en sistemas
+  que no distinguen mayúsculas.
+- El nombre remoto se normaliza a NFC; se reemplazan los separadores
+  (`/`, `\`), los caracteres no válidos en Windows y los de control; se
+  evitan los nombres reservados (`CON`, `NUL`, `COM1`...); se quitan
+  los puntos y espacios de los extremos, y se recorta a 80 caracteres.
+  `--` y `__` se colapsan para no interferir con el separador ni con
+  los nombres del procesador local.
+- Si el contenido de un archivo cambió en Drive desde una descarga
+  anterior, el nuevo se guarda como `...rev-<md5[:12]><ext>` y el
+  anterior se conserva.
+
+**Procedencia.** Cada imagen tiene un registro en
+`.drive/<nombre local>.json` con el `fileId` exacto (sin normalizar),
+el nombre original, el tipo, el tamaño, el MD5 y el SHA-256 de Drive,
+la versión, la revisión y el SHA-256 local. Un archivo local nunca se
+atribuye a otro `fileId`, y un archivo sin registro nunca se
+sobrescribe.
+
+**Integridad.**
+
+1. Antes de descargar se exigen `capabilities.canDownload`, un tipo y
+   una extensión admitidos, un tamaño declarado mayor que 0 y dentro
+   del límite (25 MiB por defecto) y el `md5Checksum` de Drive. Sin
+   checksum la imagen se rechaza: no se podría verificar.
+2. La descarga se hace por bloques de 4 MiB a un temporal en la carpeta
+   de destino, calculando MD5 y SHA-256. Si llegan más bytes de los
+   declarados, se aborta.
+3. Al terminar se comparan el tamaño, el MD5 y el SHA-256 de Drive
+   (cuando lo informa). Pillow debe abrir y decodificar la imagen
+   completa, su formato debe coincidir con el tipo declarado, y su
+   protección contra bombas de descompresión se respeta: una imagen
+   por encima de su límite se rechaza.
+4. Una nueva consulta confirma que el MD5, el tamaño y la revisión no
+   cambiaron en Drive durante la descarga.
+5. Solo entonces se registra el SHA-256 como pendiente, se publica la
+   imagen sin sobrescribir y se completa el registro.
+
+Un archivo incompleto, alterado o corrupto nunca se publica: el
+temporal se elimina y la imagen figura como fallida. Si el proceso se
+interrumpe, al repetir el comando se omiten las imágenes ya
+verificadas, se recuperan las publicadas cuyo registro quedó pendiente
+(si su SHA-256 coincide) y se vuelve a descargar el resto. Los
+temporales abandonados se eliminan después de 24 horas.
+
+Cada bloque se reintenta ante errores 429, 5xx o de red, con un máximo
+de 4 reintentos por imagen. Un error de autorización detiene el lote;
+uno de permisos o de certificado SSL no se reintenta.
+
+No se admiten descargas concurrentes sobre la misma carpeta local.
 
 ### Permisos y riesgos
 

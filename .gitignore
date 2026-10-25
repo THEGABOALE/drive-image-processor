@@ -4,9 +4,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# Imágenes de prueba y resultados
+# Imágenes de prueba, descargas de Drive y resultados
 inputs/
 outputs/
+downloads/
 
 # Variables de entorno
 .env

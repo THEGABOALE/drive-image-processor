@@ -17,6 +17,7 @@ execute() clasifica las respuestas:
 import logging
 import ssl
 import time
+from dataclasses import dataclass
 
 import httplib2
 from google.auth.exceptions import RefreshError, TransportError
@@ -78,93 +79,135 @@ def _retry_after(error: HttpError) -> float | None:
     return min(max(value, 0.0), MAX_DELAY_SECONDS)
 
 
-def _backoff(attempt: int) -> float:
+def backoff(attempt: int) -> float:
+    """Espera antes del reintento número attempt (1, 2, 4, 8... s)."""
+
     return min(BASE_DELAY_SECONDS * 2 ** (attempt - 1), MAX_DELAY_SECONDS)
+
+
+@dataclass(frozen=True)
+class TranslatedError:
+    error: DriveError
+    retryable: bool
+    retry_after: float | None = None
+
+
+def translate_error(exc: BaseException) -> TranslatedError | None:
+    """
+    Clasifica una excepción de la API o de la red. Devuelve None si
+    no corresponde a Drive (se deja propagar sin cambios).
+    """
+    if isinstance(exc, HttpError):
+        status = exc.status_code
+        reasons = _reasons(exc)
+        rate_limited = status == 429 or (
+            status == 403 and bool(reasons & RATE_LIMIT_REASONS)
+        )
+
+        if status == 401:
+            return TranslatedError(
+                DriveAuthError(
+                    "Google rechazó la autorización (401). Vuelva a "
+                    "autorizar con: python -m image_processor.drive_cli auth"
+                ),
+                retryable=False,
+            )
+
+        if not rate_limited and status not in TRANSIENT_STATUSES:
+            detail = f": {', '.join(sorted(reasons))}" if reasons else ""
+
+            if status == 403:
+                error = DriveAccessError(
+                    f"Google Drive denegó el acceso (403{detail})."
+                )
+            elif status == 404:
+                error = DriveNotFoundError(
+                    "El archivo o la carpeta no existe o no es "
+                    "accesible para esta cuenta (404)."
+                )
+            else:
+                error = DriveError(
+                    f"Google Drive respondió con un error ({status}{detail})."
+                )
+
+            return TranslatedError(error, retryable=False)
+
+        if rate_limited:
+            error = DriveRateLimitError(
+                f"Google Drive limitó las solicitudes ({status}). "
+                "Inténtelo de nuevo más tarde."
+            )
+        else:
+            error = DriveTransientError(
+                f"Google Drive no está disponible temporalmente ({status})."
+            )
+
+        return TranslatedError(error, retryable=True, retry_after=_retry_after(exc))
+
+    if isinstance(exc, RefreshError):
+        return TranslatedError(
+            DriveAuthError(
+                "La autorización expiró o fue revocada. Vuelva a "
+                "autorizar con: python -m image_processor.drive_cli auth"
+            ),
+            retryable=False,
+        )
+
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return TranslatedError(
+            DriveNetworkError(
+                "No se pudo verificar el certificado SSL de Google. "
+                "Revise la red (por ejemplo, un proxy que intercepta "
+                "HTTPS). La verificación no se desactiva."
+            ),
+            retryable=False,
+        )
+
+    if isinstance(
+        exc,
+        (
+            TimeoutError,
+            ConnectionError,
+            httplib2.HttpLib2Error,
+            TransportError,
+            OSError,
+        ),
+    ):
+        return TranslatedError(
+            DriveNetworkError(
+                "No se pudo comunicar con Google Drive "
+                f"({type(exc).__name__})."
+            ),
+            retryable=True,
+        )
+
+    return None
 
 
 def execute(request, *, attempts: int = MAX_ATTEMPTS, sleep=time.sleep):
     """Ejecuta una solicitud de la API con la política de errores."""
 
     for attempt in range(1, attempts + 1):
-        delay = _backoff(attempt)
-
         try:
             return request.execute()
+        except Exception as exc:
+            translated = translate_error(exc)
 
-        except HttpError as exc:
-            status = exc.status_code
-            reasons = _reasons(exc)
-            rate_limited = status == 429 or (
-                status == 403 and reasons & RATE_LIMIT_REASONS
-            )
+            if translated is None:
+                raise
 
-            if status == 401:
-                raise DriveAuthError(
-                    "Google rechazó la autorización (401). Vuelva a "
-                    "autorizar con: python -m image_processor.drive_cli auth"
-                ) from None
+            if not translated.retryable:
+                raise translated.error from None
 
-            if not rate_limited and status not in TRANSIENT_STATUSES:
-                detail = f": {', '.join(sorted(reasons))}" if reasons else ""
-
-                if status == 403:
-                    raise DriveAccessError(
-                        f"Google Drive denegó el acceso (403{detail})."
-                    ) from None
-
-                if status == 404:
-                    raise DriveNotFoundError(
-                        "El archivo o la carpeta no existe o no es "
-                        "accesible para esta cuenta (404)."
-                    ) from None
-
-                raise DriveError(
-                    f"Google Drive respondió con un error ({status}{detail})."
-                ) from None
-
-            if rate_limited:
-                failure = DriveRateLimitError(
-                    f"Google Drive limitó las solicitudes ({status}). "
-                    "Inténtelo de nuevo más tarde."
-                )
-            else:
-                failure = DriveTransientError(
-                    f"Google Drive no está disponible temporalmente ({status})."
-                )
-
-            delay = _retry_after(exc) or delay
-
-        except RefreshError:
-            raise DriveAuthError(
-                "La autorización expiró o fue revocada. Vuelva a "
-                "autorizar con: python -m image_processor.drive_cli auth"
-            ) from None
-
-        except ssl.SSLCertVerificationError:
-            raise DriveNetworkError(
-                "No se pudo verificar el certificado SSL de Google. "
-                "Revise la red (por ejemplo, un proxy que intercepta "
-                "HTTPS). La verificación no se desactiva."
-            ) from None
-
-        except (
-            TimeoutError,
-            ConnectionError,
-            httplib2.HttpLib2Error,
-            TransportError,
-            OSError,
-        ) as exc:
-            failure = DriveNetworkError(
-                "No se pudo comunicar con Google Drive "
-                f"({type(exc).__name__})."
-            )
+            failure = translated.error
+            delay = translated.retry_after or backoff(attempt)
 
         logger.debug(
             "Intento %d de %d fallido: %s", attempt, attempts, failure
         )
 
         if attempt == attempts:
-            raise failure
+            raise failure from None
 
         sleep(delay)
 

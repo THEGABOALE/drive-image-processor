@@ -1,9 +1,10 @@
 """
-Consulta de solo lectura de Google Drive.
+Consulta y descarga de solo lectura de Google Drive.
 
     python -m image_processor.drive_cli auth
     python -m image_processor.drive_cli list-folders
     python -m image_processor.drive_cli list-images --folder-id ID [--originals-only]
+    python -m image_processor.drive_cli download --folder-id ID --output DIR [--limit N]
     python -m image_processor.drive_cli logout
 
 Códigos de salida:
@@ -14,6 +15,8 @@ Códigos de salida:
 3  Autorización ausente, expirada, revocada o insuficiente.
 4  Sin permiso, inexistente o no es una carpeta.
 5  Error de red o límite de solicitudes después de los reintentos.
+6  download: alguna imagen no se pudo descargar o verificar, o su
+   registro quedó pendiente.
 """
 
 import argparse
@@ -21,7 +24,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from .google_drive import auth, client, queries
+from .google_drive import auth, client, downloads, queries
 from .google_drive.errors import (
     DriveAccessError,
     DriveAuthError,
@@ -143,6 +146,92 @@ def _command_list_images(args) -> int:
     return 0
 
 
+_LABELS = {
+    downloads.DOWNLOADED: "[OK]",
+    downloads.VERIFIED: "[VERIFICADA]",
+    downloads.RECOVERED: "[RECUPERADA]",
+    downloads.REJECTED: "[RECHAZADA]",
+    downloads.FAILED: "[ERROR]",
+}
+
+
+def _command_download(args) -> int:
+    if args.limit is not None and args.limit < 1:
+        raise ValueError("--limit debe ser al menos 1.")
+
+    if not 0 < args.max_file_mb <= 1024:
+        raise ValueError("--max-file-mb debe estar entre 0 y 1024.")
+
+    _, service = _connect(args.secrets_dir)
+
+    def show(item):
+        if item.status == downloads.REJECTED and not args.show_skipped:
+            return
+
+        name = item.name or "?"
+        line = f"{_LABELS[item.status]} {name} ({item.file_id or '?'})"
+
+        if item.local_name:
+            line += f" -> {item.local_name}"
+
+        if item.status == downloads.FAILED:
+            line += f": {item.reason} No se publicó ningún archivo."
+        elif item.reason:
+            line += f": {item.reason}"
+
+        print(line, file=sys.stderr if item.status == downloads.FAILED else sys.stdout)
+
+    summary = downloads.download_folder(
+        service,
+        args.folder_id,
+        args.output,
+        limit=args.limit,
+        originals_only=args.originals_only,
+        max_file_bytes=int(args.max_file_mb * downloads.MIB),
+        on_item=show,
+    )
+
+    rejected = Counter(
+        item.reason for item in summary.items if item.status == downloads.REJECTED
+    )
+
+    print(f"\nCarpeta: {summary.folder.name} ({summary.folder.id})")
+    print(f"Destino: {args.output}")
+    print("\n===== RESUMEN DE LA DESCARGA =====")
+    print(f"Descargadas:                {summary.count(downloads.DOWNLOADED)}")
+    print(f"Ya verificadas y omitidas:  {summary.count(downloads.VERIFIED)}")
+
+    if summary.count(downloads.RECOVERED):
+        print(f"Registros recuperados:      {summary.count(downloads.RECOVERED)}")
+
+    print(f"Rechazadas:                 {sum(rejected.values())}")
+
+    for reason, count in sorted(rejected.items()):
+        print(f"  - {reason}: {count}")
+
+    print(f"Fallidas (no publicadas):   {summary.count(downloads.FAILED)}")
+    print(f"Bytes descargados:          {_format_size(summary.bytes_downloaded)}")
+
+    if summary.unregistered:
+        print(f"Con registro pendiente:     {summary.unregistered}")
+
+    if summary.temp_removed:
+        print(f"Temporales antiguos eliminados: {summary.temp_removed}")
+
+    print(
+        "\nCada archivo publicado se verificó por tamaño, MD5 de Drive y "
+        "Pillow. Las descargas incompletas nunca se publican."
+    )
+
+    if summary.aborted is not None:
+        raise summary.aborted
+
+    if summary.count(downloads.FAILED) or summary.unregistered:
+        return 6
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Consulta de solo lectura de Google Drive"
@@ -186,6 +275,33 @@ def main(argv: list[str] | None = None) -> int:
         help="Muestra cada archivo no incluido y el motivo",
     )
     images.set_defaults(handler=_command_list_images)
+
+    download = commands.add_parser(
+        "download",
+        help="Descarga y verifica las imágenes de una carpeta (sin subcarpetas)",
+    )
+    download.add_argument("--folder-id", required=True, help="ID de la carpeta")
+    download.add_argument(
+        "--output", type=Path, required=True, help="Carpeta local de destino"
+    )
+    download.add_argument(
+        "--limit", type=int, default=None,
+        help="Máximo de imágenes a descargar o verificar (para pruebas)",
+    )
+    download.add_argument(
+        "--max-file-mb", type=float,
+        default=downloads.DEFAULT_MAX_FILE_BYTES / downloads.MIB,
+        help="Tamaño máximo por imagen en MiB (por defecto, 25)",
+    )
+    download.add_argument(
+        "--originals-only", action="store_true",
+        help="Excluye los resultados TRANSFORMADA_",
+    )
+    download.add_argument(
+        "--show-skipped", action="store_true",
+        help="Muestra cada archivo rechazado y el motivo",
+    )
+    download.set_defaults(handler=_command_download)
 
     args = parser.parse_args(argv)
 

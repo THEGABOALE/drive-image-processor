@@ -201,7 +201,7 @@ def test_only_read_operations_are_used(drive):
 def test_fake_drive_rejects_write_operations():
     drive = FakeDrive()
 
-    for operation in ("create", "update", "delete", "copy", "emptyTrash", "get_media", "export"):
+    for operation in ("create", "update", "delete", "copy", "emptyTrash", "export", "watch"):
         with pytest.raises(AssertionError, match="no permitida"):
             getattr(drive.files(), operation)
 
@@ -209,18 +209,24 @@ def test_fake_drive_rejects_write_operations():
         drive.permissions()
 
 
-def test_drive_code_has_no_write_or_download_calls():
+def test_drive_code_has_no_write_calls():
     sources = [PACKAGE / "drive_cli.py", *sorted((PACKAGE / "google_drive").glob("*.py"))]
-    forbidden = re.compile(
-        r"\.(create|update|delete|copy|emptyTrash|trash|untrash|"
-        r"get_media|export|export_media|watch|generateIds|permissions|"
-        r"revisions|comments|replies)\(|MediaFileUpload|MediaIoBaseUpload|"
-        r"MediaIoBaseDownload|MediaUpload"
+    # Llamadas de escritura a los recursos de Drive y subidas.
+    writes = re.compile(
+        r"\.files\(\)\s*\.\s*(create|update|delete|copy|emptyTrash|"
+        r"trash|untrash|export|export_media|watch|generateIds|modifyLabels)\(|"
+        r"\.(permissions|revisions|comments|replies|drives|changes|channels)\(\)|"
+        r"MediaFileUpload|MediaIoBaseUpload|MediaUpload"
     )
+    downloads = re.compile(r"get_media\(|MediaIoBaseDownload")
 
     for source in sources:
         code = source.read_text(encoding="utf-8")
-        assert forbidden.search(code) is None, source.name
+        assert writes.search(code) is None, source.name
+
+        # GD-02: solo el módulo de descargas lee contenido.
+        if source.name != "downloads.py":
+            assert downloads.search(code) is None, source.name
 
     assert auth.SCOPES == ("https://www.googleapis.com/auth/drive.readonly",)
 
