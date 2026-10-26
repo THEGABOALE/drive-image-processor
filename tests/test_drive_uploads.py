@@ -1459,3 +1459,313 @@ def test_quota_after_an_ambiguous_upload_stops_the_batch(world, monkeypatch, rea
     assert summary.count(uploads.UNCERTAIN) == 0
     assert [item.file_id for item in summary.items] == ["1CuotaAmb0"]
     assert world.ledger("1CuotaAmb0")["status"] == "pending"
+
+
+# create-upload-folder: carpeta de destino propia de la aplicación ----------
+
+FOLDER_NAME = "Drive Image Processor Upload Test"
+
+
+def create_folder(world, name=FOLDER_NAME):
+    return uploads.create_upload_folder(
+        world.server.write, name, execute=world.execute, sleep=world.sleeps.append
+    )
+
+
+def root_folders(world):
+    return [
+        item for item in world.server.children.get("root", [])
+        if item["mimeType"] == queries_folder_mime()
+    ]
+
+
+def queries_folder_mime():
+    from image_processor.google_drive import queries
+    return queries.FOLDER_MIME
+
+
+def test_creates_an_app_owned_folder_in_the_root(world):
+    folder_result = create_folder(world)
+
+    assert folder_result.created is True
+    assert folder_result.name == FOLDER_NAME
+    [item] = root_folders(world)
+    assert item["id"] == folder_result.id
+    assert item["name"] == FOLDER_NAME
+    assert item["mimeType"] == "application/vnd.google-apps.folder"
+    assert item["parents"] == ["root"]
+    assert item["appProperties"] == {"dip_kind": "upload_folder"}
+    # ID preasignado, sin contenido y solo con la credencial de escritura.
+    assert world.server.generated == [folder_result.id]
+    [create] = creates(world)
+    assert create["body"]["id"] == folder_result.id
+    assert "parents" not in create["body"]
+    assert create.get("media_body") is None
+    assert set(write_calls(world)) == {"files.list", "files.generateIds", "files.create", "files.get"}
+    assert world.server.read.calls == []
+    # La aplicación tiene acceso de escritura a la carpeta creada.
+    assert folder_result.id in world.server.app_access
+
+
+def test_repeating_the_command_reuses_the_folder(world):
+    first = create_folder(world)
+
+    again = create_folder(world)
+
+    assert again.created is False
+    assert again.id == first.id
+    assert len(world.server.created) == 1
+    assert len(world.server.generated) == 1
+
+
+def test_folders_with_other_names_are_independent(world):
+    first = create_folder(world, "Destino A")
+    second = create_folder(world, "Destino B")
+
+    assert first.id != second.id
+    assert second.created is True
+
+
+def test_folder_with_the_same_name_not_created_by_the_app_is_ignored(world):
+    # Una carpeta del usuario con el mismo nombre no es visible para
+    # drive.file ni se reutiliza: se crea la propia.
+    world.server.items["1DelUsuario"] = {
+        "id": "1DelUsuario", "name": FOLDER_NAME,
+        "mimeType": "application/vnd.google-apps.folder", "parents": ["root"],
+        "trashed": False,
+    }
+    world.server.children.setdefault("root", []).append(world.server.items["1DelUsuario"])
+
+    result = create_folder(world)
+
+    assert result.created is True
+    assert result.id != "1DelUsuario"
+
+
+def test_name_with_quotes_is_escaped_in_the_query(world):
+    name = "Marca 'Primavera' \\ 2026"
+
+    first = create_folder(world, name)
+    again = create_folder(world, name)
+
+    assert again.id == first.id and again.created is False
+    [listing] = [kwargs for op, kwargs in world.server.write.calls if op == "files.list"][:1]
+    assert "name = 'Marca \\'Primavera\\' \\\\ 2026'" in listing["q"]
+
+
+def test_several_app_folders_with_the_same_name_are_reported(world):
+    first = create_folder(world)
+    duplicate = dict(world.server.items[first.id], id="1OtraCopia")
+    world.server.items["1OtraCopia"] = duplicate
+    world.server.children["root"].append(duplicate)
+    world.server.app_access.add("1OtraCopia")
+
+    with pytest.raises(uploads.DriveError, match="1OtraCopia"):
+        create_folder(world)
+
+    assert len(world.server.created) == 1
+
+
+def test_lost_response_creates_a_single_folder(world):
+    world.server.write.upload_failures = ["lost"]
+
+    result = create_folder(world)
+
+    assert result.created is True
+    attempts = world.server.write.upload_attempts
+    assert len(attempts) == 2 and len(set(attempts)) == 1
+    assert len(world.server.created) == 1
+
+
+def test_retryable_errors_use_the_same_id(world):
+    world.server.write.upload_failures = [http_error(429), http_error(503)]
+
+    result = create_folder(world)
+
+    assert result.created is True
+    assert world.server.write.upload_attempts == [result.id] * 3
+    assert world.sleeps == [1.0, 2.0]
+
+
+def test_unconfirmed_creation_asks_to_run_again_without_duplicating(world):
+    world.server.write.upload_failures = [ConnectionResetError()] * 20
+
+    with pytest.raises(uploads.DriveTransientError, match="Vuelva a ejecutar"):
+        create_folder(world)
+
+    assert world.server.created == []
+
+    world.server.write.upload_failures = []
+    result = create_folder(world)
+    assert result.created is True
+    assert len(world.server.created) == 1
+
+
+@pytest.mark.parametrize(
+    "failure, error",
+    [
+        (http_error(401), DriveAuthError),
+        (http_error(403, ["insufficientPermissions"]), DriveAccessError),
+        (http_error(403, ["dailyLimitExceeded"]), DriveQuotaError),
+        (http_error(403, ["storageQuotaExceeded"]), DriveAccessError),
+        (ssl.SSLCertVerificationError("certificado"), DriveCertificateError),
+    ],
+)
+def test_creation_errors_are_controlled_and_not_retried(world, failure, error):
+    world.server.write.upload_failures = [failure]
+
+    with pytest.raises(error) as raised:
+        create_folder(world)
+
+    assert len(world.server.write.upload_attempts) == 1
+    assert world.sleeps == []
+    assert world.server.created == []
+    if error is DriveAuthError:
+        assert "auth-write" in str(raised.value)
+
+
+@pytest.mark.parametrize("name", ["", "   ", "Carpeta\x00", "Línea\nnueva", "x" * 256])
+def test_invalid_folder_names_are_rejected(world, name):
+    with pytest.raises(ValueError):
+        create_folder(world, name)
+
+    assert world.server.write.calls == []
+
+
+def test_created_folder_unlocks_the_upload(world):
+    world.add("1Desbloqueo", "producto.jpg")
+    world.prepare()
+    target = create_folder(world)
+
+    preview = world.upload(dry_run=True, target_folder_id=target.id)
+
+    assert preview.write_access is True
+    assert [item.status for item in preview.items] == [uploads.PLANNED]
+
+    before = world.originals()
+    summary = world.upload(target_folder_id=target.id)
+
+    [item] = summary.items
+    assert item.status == uploads.UPLOADED
+    assert world.server.items[item.remote_id]["parents"] == [target.id]
+    assert world.originals() == {
+        key: value for key, value in world.originals().items() if key in before
+    }
+    assert all(world.originals()[key] == value for key, value in before.items())
+
+
+def folder_cli(*extra):
+    return drive_cli.main(["create-upload-folder", *extra])
+
+
+def test_cli_creates_the_folder_and_prints_its_id(cli_world, capsys):
+    read_token = cli_world.paths.token.read_bytes()
+    write_token = cli_world.paths.write_token.read_bytes()
+
+    assert folder_cli("--name", FOLDER_NAME) == 0
+
+    out = capsys.readouterr().out
+    [folder_id] = cli_world.server.created
+    assert FOLDER_NAME in out
+    assert folder_id in out
+    assert f"--target-folder-id {folder_id}" in out
+    assert "drive.file" in out
+    assert cli_world.paths.token.read_bytes() == read_token
+    assert cli_world.paths.write_token.read_bytes() == write_token
+
+    assert folder_cli("--name", FOLDER_NAME) == 0
+    assert "ya existía" in capsys.readouterr().out
+    assert len(cli_world.server.created) == 1
+
+
+def test_cli_only_needs_the_write_authorization(cli_world, capsys):
+    cli_world.paths.token.unlink()
+
+    assert folder_cli("--name", FOLDER_NAME) == 0
+    assert not cli_world.paths.token.exists()
+    assert cli_world.server.read.calls == []
+
+
+@pytest.mark.parametrize(
+    "setup, code, message",
+    [
+        (lambda w: w.paths.write_token.unlink(), 3, "auth-write"),
+        (lambda w: w.server.write.upload_failures.append(http_error(401)), 3, "auth-write"),
+        (lambda w: w.server.write.upload_failures.append(http_error(403, ["insufficientPermissions"])), 4, "403"),
+        (lambda w: w.server.write.upload_failures.append(http_error(403, ["storageQuotaExceeded"])), 4, "almacenamiento"),
+        (lambda w: w.server.write.upload_failures.append(http_error(403, ["dailyLimitExceeded"])), 5, "cuota"),
+        (lambda w: w.server.write.upload_failures.extend([ConnectionResetError()] * 20), 5, "Vuelva a ejecutar"),
+        (lambda w: w.server.write.upload_failures.append(ssl.SSLCertVerificationError("x")), 5, "certificado"),
+    ],
+)
+def test_cli_error_codes_for_folder_creation(cli_world, capsys, setup, code, message):
+    setup(cli_world)
+
+    assert folder_cli("--name", FOLDER_NAME) == code
+
+    _, err = capsys.readouterr()
+    assert message in err
+    assert cli_world.server.created == []
+    for secret in (ACCESS, REFRESH, "SECRETO-CLIENTE"):
+        assert secret not in err
+
+
+def test_cli_rejects_invalid_names(cli_world, capsys):
+    assert folder_cli("--name", "   ") == 2
+    assert cli_world.server.write.calls == []
+
+    with pytest.raises(SystemExit) as error:
+        folder_cli()
+    assert error.value.code == 2
+
+
+def test_upload_access_error_suggests_the_new_command(world):
+    world.add("1Sugerencia", "producto.jpg")
+    world.prepare()
+
+    summary = world.upload(dry_run=True, target_folder_id=LOCKED)
+
+    assert "create-upload-folder" in summary.write_access_note
+
+
+@pytest.mark.parametrize(
+    "change, problem",
+    [
+        (lambda item: item.update(name="Otro nombre"), "nombre"),
+        (lambda item: item.update(mimeType="image/png"), "no es una carpeta"),
+        (lambda item: item.update(appProperties={}), "marca"),
+        (lambda item: item.update(trashed=True), "papelera"),
+    ],
+)
+def test_created_folder_is_verified(world, monkeypatch, change, problem):
+    real_create = world.server.create
+
+    def create_and_alter(kwargs):
+        item = real_create(kwargs)
+        change(item)
+        return item
+
+    monkeypatch.setattr(world.server, "create", create_and_alter)
+
+    with pytest.raises(uploads.DriveError, match=problem):
+        create_folder(world)
+
+
+def test_visible_folder_without_the_app_marker_is_not_reused(world):
+    # Una carpeta accesible para la aplicación (por ejemplo, autorizada
+    # con Picker) con el mismo nombre, pero sin la marca de carpeta de
+    # destino: no se adopta.
+    item = {
+        "id": "1Autorizada", "name": FOLDER_NAME,
+        "mimeType": "application/vnd.google-apps.folder", "parents": ["root"],
+        "trashed": False,
+    }
+    world.server.items["1Autorizada"] = item
+    world.server.children.setdefault("root", []).append(item)
+    world.server.app_access.add("1Autorizada")
+
+    result = create_folder(world)
+
+    assert result.created is True
+    assert result.id != "1Autorizada"
+    assert world.server.items["1Autorizada"] == item

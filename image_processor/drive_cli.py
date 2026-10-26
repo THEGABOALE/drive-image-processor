@@ -7,6 +7,7 @@ Consulta y descarga de solo lectura de Google Drive.
     python -m image_processor.drive_cli download --folder-id ID --output DIR [--limit N]
     python -m image_processor.drive_cli process-local --folder-id ID --input DIR --output DIR
     python -m image_processor.drive_cli auth-write
+    python -m image_processor.drive_cli create-upload-folder --name NOMBRE
     python -m image_processor.drive_cli upload --folder-id ID --input DIR --limit N [--dry-run]
     python -m image_processor.drive_cli logout [--write]
 
@@ -451,6 +452,33 @@ def _command_process_local(args) -> int:
     return 0
 
 
+def _command_create_upload_folder(args) -> int:
+    name = uploads.validate_folder_name(args.name)
+
+    # Solo la autorización de escritura (drive.file): token.json no se usa.
+    _, service = _connect(args.secrets_dir, profile=auth.WRITE)
+    folder = uploads.create_upload_folder(service, name)
+
+    state = (
+        "creada ahora" if folder.created
+        else "ya existía (creada antes por la aplicación); no se creó otra"
+    )
+    print(f"Carpeta de destino: {folder.name}")
+    print(f"ID: {folder.id}")
+    print(f"Estado: {state}")
+    print(
+        f"Ubicación: raíz de Mi unidad. Permiso: {auth.WRITE_SCOPE} (la "
+        "aplicación puede crear archivos en ella porque la creó)."
+    )
+    print(
+        "\nCompruebe el acceso con:\n"
+        "  python -m image_processor.drive_cli upload --folder-id "
+        "ID_DE_LOS_ORIGINALES --input CARPETA_DE_RESULTADOS "
+        f"--target-folder-id {folder.id} --limit 1 --dry-run"
+    )
+    return 0
+
+
 _UPLOAD_LABELS = {
     uploads.UPLOADED: "[SUBIDA]",
     uploads.VERIFIED: "[VERIFICADA]",
@@ -615,6 +643,16 @@ def main(argv: list[str] | None = None) -> int:
             "modificar la autorización de solo lectura"
         ),
     ).set_defaults(handler=_command_auth_write)
+
+    folder = commands.add_parser(
+        "create-upload-folder",
+        help=(
+            "Crea en la raíz de Mi unidad una carpeta de destino propia de "
+            "la aplicación (drive.file), o reutiliza la que ya creó"
+        ),
+    )
+    folder.add_argument("--name", required=True, help="Nombre de la carpeta")
+    folder.set_defaults(handler=_command_create_upload_folder)
 
     logout = commands.add_parser(
         "logout", help="Elimina la autorización guardada localmente"

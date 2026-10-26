@@ -279,6 +279,27 @@ class FakeUploadRequest:
 
         return None, copy.deepcopy(created)
 
+    def execute(self):
+        """files.create sin contenido (carpetas): mismas fallas simuladas."""
+
+        view = self.view
+        view.upload_attempts.append(self.kwargs["body"].get("id"))
+
+        if len(view.upload_attempts) > MAX_FAKE_CHUNK_CALLS:
+            raise AssertionError("la creación no termina: ciclo sin fin")
+
+        failure = view.upload_failures.pop(0) if view.upload_failures else None
+
+        if isinstance(failure, BaseException):
+            raise failure
+
+        created = view.server.create(self.kwargs)
+
+        if failure == "lost":
+            raise ConnectionResetError("se perdió la respuesta")
+
+        return copy.deepcopy(created)
+
 
 class _View:
     """Una credencial: lectura (drive.readonly) o escritura (drive.file)."""
@@ -372,6 +393,12 @@ class FakeDriveServer(FakeDrive):
         if "trashed = false" in q:
             files = [item for item in files if not item.get("trashed")]
 
+        for field in ("name", "mimeType"):
+            literal = re.search(rf"\b{field} = '((?:[^'\\]|\\.)*)'", q)
+            if literal:
+                value = re.sub(r"\\(.)", r"\1", literal.group(1))
+                files = [item for item in files if item.get(field) == value]
+
         prop = re.search(r"appProperties has \{ key='([^']+)' and value='([^']+)' \}", q)
 
         if prop:
@@ -404,6 +431,26 @@ class FakeDriveServer(FakeDrive):
             # drive.file: solo carpetas creadas o autorizadas para la app.
             if parent not in self.app_access:
                 raise http_error(404, ["notFound"])
+
+        if kwargs.get("media_body") is None:
+            # Carpeta: sin contenido; sin parents, en la raíz de Mi unidad.
+            assert body["mimeType"] == FOLDER_MIME
+            item = {
+                "id": file_id,
+                "name": body["name"],
+                "mimeType": FOLDER_MIME,
+                "parents": list(body.get("parents") or ["root"]),
+                "appProperties": dict(body.get("appProperties") or {}),
+                "description": body.get("description"),
+                "trashed": False,
+            }
+            self.items[file_id] = item
+            for parent in item["parents"]:
+                self.children.setdefault(parent, []).append(item)
+            self.children.setdefault(file_id, [])
+            self.app_access.add(file_id)
+            self.created.append(file_id)
+            return item
 
         media = kwargs["media_body"]
         assert media.resumable() and media.mimetype() == "image/png"

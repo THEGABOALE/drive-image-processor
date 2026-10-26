@@ -418,6 +418,7 @@ dañado o destino con resultados de otra carpeta de Drive.
 
 ```
 python -m image_processor.drive_cli auth-write
+python -m image_processor.drive_cli create-upload-folder --name "Drive Image Processor Upload Test"
 python -m image_processor.drive_cli upload --folder-id ID --input outputs/gd03a-prueba --limit 1 --dry-run
 python -m image_processor.drive_cli upload --folder-id ID --input outputs/gd03a-prueba --limit 1
 python -m image_processor.drive_cli upload --folder-id ID --input outputs/gd03a-prueba --limit 3 --target-folder-id OTRO_ID
@@ -445,6 +446,32 @@ existente que la aplicación no creó, como la de prueba, normalmente
 acceso, se detiene con el código 4 y lo explica. Que una carpeta sea
 accesible (o elegida con Picker) no da acceso a los archivos que ya
 contiene.
+
+**Carpeta de destino propia.** Mientras Picker no esté integrado,
+`create-upload-folder --name NOMBRE` crea una carpeta en la raíz de Mi
+unidad con la autorización de escritura. Como la crea la aplicación,
+`drive.file` le da acceso de escritura:
+
+1. `create-upload-folder --name "Drive Image Processor Upload Test"`
+   muestra el nombre y el ID de la carpeta.
+2. `upload ... --target-folder-id ID --limit 1 --dry-run` debería
+   informar `Permiso de escritura (drive.file): verificado`.
+3. `upload ... --target-folder-id ID --limit 1` sube el primer PNG.
+
+El comando usa solo `token_write.json` (no lee ni modifica
+`token.json`), crea únicamente una carpeta
+(`application/vnd.google-apps.folder`) y no sube imágenes. Se marca con
+`appProperties` (`dip_kind=upload_folder`): si ya existe una carpeta
+propia con ese nombre en la raíz, se reutiliza en lugar de crear otra.
+Una carpeta del usuario con el mismo nombre no se reutiliza (no es
+visible para `drive.file`). Se crea con un ID preasignado: los
+reintentos (429, 5xx, red) usan el mismo ID y no duplican la carpeta;
+si la creación no se puede confirmar, basta con volver a ejecutar el
+comando. Códigos de salida: 0 lista (creada o reutilizada); 2 nombre
+inválido; 3 autorización de escritura ausente o revocada; 4 sin
+permiso o almacenamiento lleno; 5 red, límite de solicitudes, cuota
+agotada o certificado SSL; 1 varias carpetas propias con el mismo
+nombre (se listan sus IDs) o una respuesta inesperada.
 
 **Qué se sube.** Solo los PNG registrados como completos en el
 manifiesto de GD-03A, de originales de la carpeta `--folder-id` y con

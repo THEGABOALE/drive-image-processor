@@ -66,6 +66,15 @@ mimeType image/png, tamaño, MD5 (y SHA-256 si Drive lo informa) y la
 identidad. Una subida que no se puede verificar nunca se da por
 completada.
 
+Carpeta de destino propia
+-------------------------
+
+create_upload_folder() crea, con drive.file, una carpeta en la raíz de
+Mi unidad: al crearla la aplicación, tiene acceso de escritura a ella
+sin Google Picker. Se identifica por su nombre y por appProperties
+(dip_kind=upload_folder): repetir el comando reutiliza la carpeta en
+lugar de duplicarla. Como los PNG, se crea con un ID preasignado.
+
 No se admiten subidas concurrentes sobre la misma carpeta de resultados.
 """
 
@@ -137,6 +146,11 @@ PROP_SOURCE_FILE_ID = "dip_source_file_id"
 PROP_SOURCE_SHA256 = "dip_source_sha256"
 PROP_OUTPUT_SHA256 = "dip_output_sha256"
 PROP_CONFIG = "dip_config"
+PROP_KIND = "dip_kind"
+
+UPLOAD_FOLDER_KIND = "upload_folder"
+MAX_FOLDER_NAME = 255
+_FOLDER_FIELDS = "id, name, mimeType, parents, trashed, appProperties"
 
 REMOTE_FIELDS = (
     "id, name, mimeType, parents, size, md5Checksum, sha256Checksum, "
@@ -674,7 +688,9 @@ def _check_write_access(ctx: _Context) -> None:
             "la aplicación solo puede crear archivos en carpetas que ella "
             "creó o que el usuario le autorizó (por ejemplo, con Google "
             "Picker, todavía no integrado). No se subió nada y no se "
-            "solicita el permiso 'drive'."
+            "solicita el permiso 'drive'. Puede crear una carpeta propia de "
+            "la aplicación con: python -m image_processor.drive_cli "
+            'create-upload-folder --name "NOMBRE"'
         )
 
     if (item.get("capabilities") or {}).get("canAddChildren") is False:
@@ -1226,3 +1242,164 @@ def upload_results(
             break
 
     return summary
+
+
+# Carpeta de destino propia -------------------------------------------------
+
+@dataclass(frozen=True)
+class UploadFolder:
+    id: str
+    name: str
+    # False: ya existía (creada antes por la aplicación) y se reutilizó.
+    created: bool
+
+
+def validate_folder_name(name: str) -> str:
+    """Nombre de carpeta normalizado (NFC), o ValueError."""
+
+    text = unicodedata.normalize("NFC", name or "").strip()
+
+    if not text:
+        raise ValueError("El nombre de la carpeta no puede estar vacío.")
+
+    if len(text) > MAX_FOLDER_NAME:
+        raise ValueError(
+            f"El nombre de la carpeta supera los {MAX_FOLDER_NAME} caracteres."
+        )
+
+    if any(unicodedata.category(char).startswith("C") for char in text):
+        raise ValueError(
+            "El nombre de la carpeta no puede tener caracteres de control."
+        )
+
+    return text
+
+
+def _query_literal(text: str) -> str:
+    """Literal de texto para una consulta de Drive (q)."""
+
+    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _run_write(execute, request):
+    try:
+        return execute(request)
+    except DriveError as exc:
+        raise _write_error(exc) from None
+
+
+def _folder_problem(item: dict, name: str) -> str | None:
+    if item.get("trashed"):
+        return "está en la papelera"
+    if item.get("mimeType") != queries.FOLDER_MIME:
+        return "no es una carpeta"
+    if item.get("name") != name:
+        return "no tiene el nombre pedido"
+    if (item.get("appProperties") or {}).get(PROP_KIND) != UPLOAD_FOLDER_KIND:
+        return "no tiene la marca de la aplicación"
+    return None
+
+
+def create_upload_folder(write_service, name: str, *, execute=None, sleep=None) -> UploadFolder:
+    """
+    Carpeta de destino en la raíz de Mi unidad, creada por la
+    aplicación con la autorización de escritura (drive.file).
+
+    Si ya hay una carpeta propia con ese nombre, se reutiliza. Si no,
+    se crea con un ID preasignado: los reintentos usan el mismo ID y un
+    409 indica que un intento anterior ya la creó. Solo crea la
+    carpeta: no sube ni modifica ningún otro archivo.
+    """
+    name = validate_folder_name(name)
+    execute = execute or client.execute
+    sleep = sleep or time.sleep
+
+    def run(request):
+        return _run_write(execute, request)
+
+    found = _list(
+        write_service, run,
+        f"'root' in parents and trashed = false and "
+        f"mimeType = '{queries.FOLDER_MIME}' and name = {_query_literal(name)} "
+        f"and appProperties has {{ key='{PROP_KIND}' and value='{UPLOAD_FOLDER_KIND}' }}",
+        _FOLDER_FIELDS,
+    )
+
+    if len(found) > 1:
+        ids = ", ".join(sorted(item["id"] for item in found))
+        raise DriveError(
+            f"Ya hay {len(found)} carpetas '{name}' creadas por la aplicación "
+            f"({ids}). Use el ID que corresponda con --target-folder-id; no "
+            "se crea otra."
+        )
+
+    if found:
+        return UploadFolder(found[0]["id"], found[0].get("name") or name, created=False)
+
+    response = run(write_service.files().generateIds(count=1, space="drive", type="files"))
+    ids = response.get("ids") if isinstance(response, dict) else None
+
+    if not isinstance(ids, list) or len(ids) != 1:
+        raise DriveResponseError("Google Drive no devolvió un ID preasignado.")
+
+    folder_id = queries.validate_file_id(ids[0])
+    body = {
+        "id": folder_id,
+        "name": name,
+        "mimeType": queries.FOLDER_MIME,
+        "appProperties": {PROP_KIND: UPLOAD_FOLDER_KIND},
+        "description": (
+            "Carpeta de destino creada por drive-image-processor (drive.file)."
+        ),
+    }
+    unconfirmed = None
+    retries = 0
+
+    while True:
+        try:
+            write_service.files().create(
+                body=body, fields=_FOLDER_FIELDS, supportsAllDrives=True
+            ).execute()
+            break
+        except Exception as exc:
+            if isinstance(exc, HttpError) and exc.status_code == 409:
+                # Un intento anterior ya la creó con este ID.
+                break
+
+            translated = client.translate_error(exc)
+
+            if translated is None:
+                raise
+
+            if not translated.retryable:
+                raise _write_error(translated.error) from None
+
+            if retries >= MAX_UPLOAD_RETRIES:
+                unconfirmed = translated.error
+                break
+
+        retries += 1
+        sleep(translated.retry_after or client.backoff(retries))
+
+    try:
+        item = run(write_service.files().get(
+            fileId=folder_id, fields=_FOLDER_FIELDS, supportsAllDrives=True
+        ))
+    except DriveNotFoundError:
+        item = None
+
+    if item is None:
+        raise DriveTransientError(
+            f"{unconfirmed or 'Google Drive no confirmó la carpeta creada.'} "
+            "No se pudo confirmar la carpeta. Vuelva a ejecutar el comando: "
+            "buscará la carpeta por su nombre antes de crear otra."
+        )
+
+    problem = _folder_problem(item, name)
+
+    if problem is not None:
+        raise DriveResponseError(
+            f"La carpeta creada ({folder_id}) {problem}; revísela en Drive."
+        )
+
+    return UploadFolder(folder_id, item["name"], created=True)
