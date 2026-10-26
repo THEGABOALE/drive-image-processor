@@ -106,6 +106,9 @@ class Discovery:
     other_folder: list[Excluded] = field(default_factory=list)
     # Revisiones anteriores de un fileId con una más reciente.
     superseded: list[Excluded] = field(default_factory=list)
+    # Todas las descargas válidas de la carpeta, antes de elegir la
+    # revisión vigente de cada fileId (para una selección explícita).
+    valid: list[DriveSource] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -132,6 +135,18 @@ class LocalProcessingResult:
     selected: list[DriveSource]
     batch: batch.BatchResult
     prepared: list[PreparedResult]
+    # Con una selección explícita: las descargas pedidas que no están o
+    # no son válidas, y los rechazos que corresponden a la selección.
+    unavailable: list[Excluded] = field(default_factory=list)
+    scoped_rejected: list[Excluded] | None = None
+
+    @property
+    def rejected(self) -> list[Excluded]:
+        """Rechazos que impiden un lote completo."""
+
+        if self.scoped_rejected is None:
+            return self.discovery.rejected
+        return self.scoped_rejected + self.unavailable
 
     @property
     def complete(self) -> bool:
@@ -139,7 +154,7 @@ class LocalProcessingResult:
 
         result = self.batch
         return not (
-            self.discovery.rejected
+            self.rejected
             or result.failed
             or result.unverified
             or result.unregistered
@@ -373,6 +388,7 @@ def discover_downloads(input_dir: Path, folder_id: str) -> Discovery:
 
         verified.append(DriveSource(path, _source_record(record, name, record["size"])))
 
+    discovery.valid = list(verified)
     discovery.sources = sorted(
         _select_current(verified, discovery),
         key=lambda source: (
@@ -387,8 +403,11 @@ def discover_downloads(input_dir: Path, folder_id: str) -> Discovery:
 
 # Resultados -----------------------------------------------------------------
 
-def _check_output_folder(output_dir: Path, folder_id: str) -> None:
-    """Un destino solo guarda resultados de una carpeta de Drive."""
+def check_output_folder(output_dir: Path, folder_id: str) -> None:
+    """
+    Un destino solo guarda resultados de una carpeta de Drive. Solo
+    lee: lanza ManifestError o ForeignFolderError.
+    """
 
     if not output_dir.is_dir():
         return
@@ -485,11 +504,18 @@ def process_downloads(
     limit: int | None = None,
     dry_run: bool = False,
     on_item=None,
+    selection=None,
 ) -> LocalProcessingResult:
     """
     Procesa las descargas verificadas de folder_id con el lote común
     (batch.process_sources). limit cuenta las imágenes seleccionadas,
     en el orden de GD-02; los rechazos se informan siempre.
+
+    selection (sync, GD-04) es una lista de pares (fileId, nombre
+    local): se procesan exactamente esas descargas, en ese orden, sin
+    elegir la revisión por versión. Una descarga pedida que no está o
+    no es válida se informa en unavailable. Solo cuentan los rechazos
+    de los fileId pedidos. No se combina con limit.
 
     on_item(DriveSource, batch.ItemResult) recibe el estado de cada
     imagen. Lanza ForeignFolderError o ManifestError antes de procesar.
@@ -497,13 +523,43 @@ def process_downloads(
     if limit is not None and limit < 1:
         raise ValueError("El límite debe ser al menos 1.")
 
+    if limit is not None and selection is not None:
+        raise ValueError("limit y selection no se combinan.")
+
     options = options or OutputOptions()
     output_dir = Path(output_dir)
 
     discovery = discover_downloads(input_dir, folder_id)
-    selected = discovery.sources[:limit] if limit is not None else list(discovery.sources)
+    unavailable: list[Excluded] = []
+    scoped_rejected = None
 
-    _check_output_folder(output_dir, folder_id)
+    if selection is None:
+        selected = discovery.sources[:limit] if limit is not None else list(discovery.sources)
+    else:
+        pairs = list(selection)
+        wanted = {file_id for file_id, _ in pairs}
+        # Por el nombre exacto: en Windows, Path no distingue mayúsculas.
+        valid = {(source.file_id, source.path.name): source for source in discovery.valid}
+        selected = []
+
+        for file_id, name in pairs:
+            source = valid.get((file_id, name))
+
+            if source is None:
+                unavailable.append(Excluded(
+                    name,
+                    "la descarga verificada no está disponible o ya no es "
+                    "válida; no se procesa otra revisión en su lugar.",
+                    file_id,
+                ))
+            else:
+                selected.append(source)
+
+        scoped_rejected = [
+            item for item in discovery.rejected if item.file_id in wanted
+        ]
+
+    check_output_folder(output_dir, folder_id)
 
     # Se busca por el texto exacto de la ruta: en Windows, Path compara
     # sin distinguir mayúsculas.
@@ -529,4 +585,6 @@ def process_downloads(
         selected=selected,
         batch=result,
         prepared=prepared_results(output_dir, selected, model_name, options),
+        unavailable=unavailable,
+        scoped_rejected=scoped_rejected,
     )

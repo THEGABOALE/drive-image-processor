@@ -544,6 +544,91 @@ también. Una cuota agotada nunca se informa como falta de permiso.
 
 No se admiten subidas concurrentes sobre la misma carpeta de resultados.
 
+### Sincronización (GD-04)
+
+```
+python -m image_processor.drive_cli sync --folder-id ID --downloads downloads/prueba --output outputs/prueba --target-folder-id ID_DESTINO --limit 3 --dry-run
+python -m image_processor.drive_cli sync --folder-id ID --downloads downloads/prueba --output outputs/prueba --target-folder-id ID_DESTINO --limit 3
+python -m image_processor.drive_cli sync --folder-id ID --downloads downloads/prueba --output outputs/prueba --target-folder-id ID_DESTINO --all --background transparent --width 800 --height 600
+```
+
+`sync` coordina `download`, `process-local` y `upload` con las mismas
+garantías de cada uno: solo descarga, procesa y sube lo que falta. La
+carpeta de destino se indica siempre con `--target-folder-id` (nunca se
+crea; para una carpeta propia, use `create-upload-folder`). Hay que
+elegir `--limit N` o `--all`. `--model`, `--background`, `--width` y
+`--height` valen para todas las etapas.
+
+**Un plan por ejecución.** Se lista la carpeta una sola vez (solo
+originales) y se eligen los originales en el orden de las descargas
+(nombre y `fileId`); el límite se aplica una sola vez. Para cada
+original, el plan guarda en memoria la descarga que quedó verificada en
+esta ejecución, la entrada exacta del manifiesto que le corresponde con
+la configuración pedida y el PNG confirmado en Drive. Cada etapa usa
+solo lo que la anterior dejó para ese original: no elige revisiones por
+versión ni reemplaza una foto fallida por otra que quedó fuera del
+límite. No hay un registro propio: al repetir el comando, el plan se
+reconstruye y cada etapa verifica o recupera con sus registros
+(procedencia, manifiesto y registro de subidas).
+
+**Contenido y metadatos.** El contenido se identifica por el `fileId`,
+el tamaño y el MD5 de Drive (y su SHA-256 si lo informa), más el
+SHA-256 de los bytes locales. El nombre, la fecha, la versión y la
+revisión son metadatos:
+
+- Si un original **solo cambió de nombre**, se reutiliza la copia local
+  (también en `download`): no se descarga, no se procesa ni se sube. El
+  PNG en Drive conserva su nombre anterior (nunca se renombra) y el
+  cambio se informa.
+- Si **cambió el contenido**, se descarga la revisión nueva, se genera
+  un resultado nuevo y se sube (con `__rev-` si el nombre ya existe).
+  Los PNG anteriores, de otra revisión o de otra configuración, se
+  informan y nunca se modifican ni se eliminan.
+- Si el contenido cambió **entre el listado y la descarga**, esa imagen
+  no se descarga ni avanza: queda fallida y se informa. La siguiente
+  ejecución la toma con su contenido nuevo.
+- Si la descarga de una revisión nueva falla, la anterior **nunca** se
+  procesa ni se sube en su lugar.
+
+**Orden y errores.** Antes de empezar se validan el manifiesto y las
+carpetas locales (código 8 o 2), las carpetas de Drive y el permiso de
+escritura de `drive.file` en el destino (código 4): sin acceso no se
+descarga nada ni se inicializa el modelo. Una etapa que se detiene
+impide empezar las siguientes. Las imágenes que fallan por sí solas no
+avanzan y las demás continúan (código 6). Los archivos sueltos y los
+originales que ya no están en Drive se informan como advertencias y no
+cambian el resultado.
+
+**Disco local lleno.** Durante la descarga, la falta de espacio
+(`ENOSPC`, `EDQUOT` y, en Windows, `ERROR_DISK_FULL`,
+`ERROR_HANDLE_DISK_FULL` y `ERROR_DISK_QUOTA_EXCEEDED`) detiene la
+sincronización con el código 9 e informa la imagen y la fase (temporal,
+registro pendiente o registro completo). Los temporales se eliminan y
+no se publica una descarga incompleta. Si la imagen ya estaba publicada
+y faltó espacio al completar su registro, queda recuperable: la
+siguiente ejecución la verifica sin descargarla de nuevo. Otros errores
+locales (por ejemplo, permisos) solo afectan a esa imagen. `download`
+mantiene su comportamiento: cada imagen falla por separado.
+
+**Vista previa.** `--dry-run` no escribe ni elimina archivos o
+carpetas, no modifica el manifiesto ni los registros, no limpia
+temporales, no inicializa el modelo, no reserva IDs ni crea archivos en
+Drive y no guarda tokens renovados. Informa lo que se sabe (qué se
+descargaría, procesaría o subiría, y qué ya está al día) y marca como
+**no determinable** lo que depende de una etapa anterior: por ejemplo,
+el resultado de una imagen que todavía hay que descargar. Una ejecución
+real guarda los tokens renovados como siempre.
+
+Códigos de salida: 0 completo; 2 argumentos o carpetas inválidos; 3
+autorización ausente, expirada o revocada; 4 sin permiso o destino sin
+acceso para `drive.file`; 5 red, cuota agotada o conexión segura
+fallida; 6 imágenes fallidas o pendientes de confirmar; 7 no se pudo
+inicializar el modelo; 8 manifiesto dañado o de otra carpeta; 9 disco
+local lleno.
+
+**No se admiten ejecuciones concurrentes** sobre las mismas carpetas
+locales: GD-04 todavía no tiene un mecanismo de bloqueo.
+
 ### Permisos y riesgos
 
 - `drive.readonly` permite leer **todos** los archivos de la cuenta.

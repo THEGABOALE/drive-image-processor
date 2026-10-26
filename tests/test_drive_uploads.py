@@ -1769,3 +1769,80 @@ def test_visible_folder_without_the_app_marker_is_not_reused(world):
     assert result.created is True
     assert result.id != "1Autorizada"
     assert world.server.items["1Autorizada"] == item
+
+
+# GD-04: resultados autorizados, destino y PNG remotos relacionados -------
+
+def entries_of(world, file_id):
+    return [
+        entry for entry in Manifest.load(world.outputs, clean=False).entries()
+        if entry.source.id == file_id
+    ]
+
+
+def test_authorized_uploads_only_the_exact_entry(world):
+    world.add("1Aut", "producto.jpg")
+    world.add("1Otra", "otra.jpg")
+    world.prepare()
+    entry = world.entry("1Aut")
+
+    summary = world.upload(authorized=[("1Aut", entry.output_name, entry.identity)])
+
+    assert [(item.file_id, item.status) for item in summary.items] == [("1Aut", uploads.UPLOADED)]
+    assert [item["name"] for item in world.remote_children()] == ["TRANSFORMADA_producto.png"]
+
+
+def test_authorized_entry_with_another_identity_is_rejected(world):
+    import dataclasses
+
+    world.add("1Ident", "producto.jpg")
+    world.prepare()
+    entry = world.entry("1Ident")
+    other = dataclasses.replace(entry.identity, source_sha256="0" * 64)
+
+    summary = world.upload(authorized=[("1Ident", entry.output_name, other)])
+
+    assert summary.items[0].status == uploads.REJECTED
+    assert "identidad" in summary.items[0].reason
+    assert creates(world) == []
+
+
+def test_authorized_and_limit_do_not_combine(world):
+    with pytest.raises(ValueError):
+        world.upload(limit=1, authorized=[])
+
+
+def test_check_target_reports_the_write_access(world):
+    read, write = world.server.read, world.server.write
+
+    own = uploads.check_target(read, write, FOLDER, execute=world.execute)
+    assert (own.write_access, own.own) == (True, write)
+
+    with pytest.raises(DriveWriteAccessError):
+        uploads.check_target(read, write, LOCKED, execute=world.execute)
+
+    preview = uploads.check_target(read, write, LOCKED, dry_run=True, execute=world.execute)
+    assert (preview.write_access, preview.own) == (False, read)
+    assert "drive.file" in preview.note
+
+    without = uploads.check_target(read, None, FOLDER, dry_run=True, execute=world.execute)
+    assert without.write_access is None
+    assert not {"files.create", "files.generateIds"} & set(write_calls(world))
+
+
+def test_related_remote_results_are_classified_without_changes(world):
+    transparent = OutputOptions(background="transparent")
+    world.add("1Rel", "producto.jpg")
+    world.prepare()
+    world.upload()
+    world.prepare(options=transparent)
+    world.upload(options=transparent)
+    before = copy.deepcopy(world.remote_children())
+
+    white = next(entry for entry in entries_of(world, "1Rel") if entry.identity.background == "white")
+    grouped = uploads.remote_results_by_source(world.server.write, FOLDER, execute=world.execute)
+    related = uploads.related_remote_results(white, FOLDER, grouped["1Rel"])
+
+    assert [result.kind for result in related] == [uploads.OTHER_CONFIGURATION]
+    assert related[0].name == "TRANSFORMADA_producto__400x400_transparent.png"
+    assert world.remote_children() == before

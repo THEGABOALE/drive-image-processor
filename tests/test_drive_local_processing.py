@@ -1022,3 +1022,51 @@ def test_drive_manifest_round_trip(processed_manifest):
     assert entry.source.drive.folder_id == FOLDER
     assert entry.identity.source_key == "1Manifiesto"
     assert json.loads(loaded.to_json()) == manifest_document(processed_manifest)
+
+
+# GD-04: selección explícita de descargas ------------------------------------
+
+def test_selection_processes_exactly_the_given_download(remote, dirs):
+    remote.add("1Sel", "producto.jpg", product(color=(200, 20, 20)), version="1")
+    remote.download(dirs.input)
+    remote.change("1Sel", product(color=(20, 20, 200)), version="2")
+    remote.download(dirs.input)
+    old = local_name("1Sel", "producto.jpg")
+
+    result = run(dirs, selection=[("1Sel", old)])
+
+    # La revisión pedida, aunque haya otra con una versión mayor.
+    assert [source.path.name for source in result.selected] == [old]
+    assert result.complete
+    entry = entries_by_file_id(dirs.output)["1Sel"]
+    assert entry["source"]["drive"]["local_name"] == old
+    assert entry["source"]["drive"]["version"] == "1"
+
+
+def test_selection_reports_a_download_that_is_not_available(remote, dirs):
+    remote.add("1Hay", "producto.jpg")
+    remote.download(dirs.input)
+
+    result = run(dirs, selection=[("1Falta", "falta--1~falta.jpg")])
+
+    assert result.selected == []
+    assert [item.file_id for item in result.unavailable] == ["1Falta"]
+    assert not result.complete
+    assert pngs(dirs.output) == []
+
+
+def test_selection_only_counts_its_own_rejections(remote, dirs):
+    remote.add("1Bien", "producto.jpg")
+    remote.download(dirs.input)
+    (dirs.input / "suelta.jpg").write_bytes(product())
+
+    result = run(dirs, selection=[("1Bien", local_name("1Bien", "producto.jpg"))])
+
+    assert result.discovery.rejected
+    assert result.rejected == []
+    assert result.complete
+
+
+def test_selection_and_limit_do_not_combine(dirs):
+    with pytest.raises(ValueError):
+        run(dirs, limit=1, selection=[])

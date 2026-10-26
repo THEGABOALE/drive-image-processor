@@ -1189,3 +1189,203 @@ def test_cli_quota_exhausted_during_download_exits_with_5(cli, capsys, reason):
     assert [file_id for file_id, _ in cli.drive.media_requests] == ["a1"]
     assert finals(cli.output) == []
     assert_clean(cli.output)
+
+
+# --- GD-04: listado compartido, vista previa, renombres y disco lleno -----
+
+def _change_content(drive, file_id, data):
+    drive.items[file_id].update(
+        size=str(len(data)),
+        md5Checksum=hashlib.md5(data).hexdigest(),
+        sha256Checksum=hashlib.sha256(data).hexdigest(),
+    )
+    drive.media[file_id] = data
+
+
+def _listing(drive, sleeps):
+    from image_processor.google_drive import queries
+    return queries.list_images(drive, FOLDER, execute=partial(client.execute, sleep=sleeps.append))
+
+
+def test_listing_and_file_ids_restrict_the_download(download, sleeps):
+    drive = make_drive(
+        (media_item("s0", "c.jpg", JPEG), JPEG),
+        (media_item("s1", "a.jpg", JPEG), JPEG),
+        (media_item("s2", "b.jpg", JPEG), JPEG),
+    )
+    listing = _listing(drive, sleeps)
+    calls = len(drive.calls)
+
+    summary = download(drive, listing=listing, file_ids=["s0", "s2"])
+
+    # En el orden de las descargas (por nombre) y sin volver a listar.
+    assert [item.file_id for item in summary.items] == ["s2", "s0"]
+    assert "files.list" not in [operation for operation, _ in drive.calls[calls:]]
+    assert {file_id for file_id, _ in drive.media_requests} == {"s0", "s2"}
+
+
+def test_limit_and_file_ids_do_not_combine(download):
+    with pytest.raises(ValueError):
+        download(make_drive(), limit=1, file_ids=[])
+
+
+def test_content_change_after_the_listing_is_not_downloaded(download, sleeps):
+    drive = make_drive((media_item("cam", "producto.jpg", JPEG), JPEG))
+    listing = _listing(drive, sleeps)
+    _change_content(drive, "cam", PNG[:0] + encoded("JPEG", color=(1, 2, 3)))
+
+    summary = download(drive, listing=listing)
+
+    assert summary.items[0].status == downloads.FAILED
+    assert "después del listado" in summary.items[0].reason
+    assert drive.media_requests == []
+
+
+def test_dry_run_download_writes_nothing(download):
+    drive = make_drive((media_item("vp", "producto.jpg", JPEG), JPEG))
+
+    summary = download(drive, dry_run=True)
+
+    assert summary.items[0].status == downloads.PLANNED
+    assert summary.items[0].local_name == downloads.local_name("producto.jpg", "vp")
+    assert not download.output.exists()
+    assert drive.media_requests == []
+
+    download(drive)
+    again = download(drive, dry_run=True)
+    assert again.items[0].status == downloads.VERIFIED
+
+
+def test_renamed_original_reuses_the_local_copy(download):
+    drive = make_drive((media_item("ren", "producto.jpg", JPEG), JPEG))
+    download(drive)
+    drive.items["ren"].update(name="producto-nuevo.jpg", version="8")
+    requests = len(drive.media_requests)
+
+    summary = download(drive)
+
+    [item] = summary.items
+    old = downloads.local_name("producto.jpg", "ren")
+    assert item.status == downloads.VERIFIED
+    assert item.local_name == old
+    assert "renombró" in item.reason
+    assert len(drive.media_requests) == requests
+    assert finals(download.output) == [old]
+    # El registro conserva el nombre anterior.
+    assert record(download.output, old)["name"] == "producto.jpg"
+
+
+def test_renamed_original_with_an_altered_local_copy_is_downloaded_again(download):
+    drive = make_drive((media_item("alt", "producto.jpg", JPEG), JPEG))
+    download(drive)
+    old = download.output / downloads.local_name("producto.jpg", "alt")
+    old.write_bytes(b"alterada")
+    drive.items["alt"]["name"] = "otro.jpg"
+
+    summary = download(drive)
+
+    assert summary.items[0].status == downloads.DOWNLOADED
+    assert summary.items[0].local_name == downloads.local_name("otro.jpg", "alt")
+    assert old.read_bytes() == b"alterada"
+
+
+def test_rename_with_a_content_change_is_a_new_download(download):
+    drive = make_drive((media_item("rc", "producto.jpg", JPEG), JPEG))
+    download(drive)
+    drive.items["rc"]["name"] = "nuevo.jpg"
+    _change_content(drive, "rc", encoded("JPEG", color=(9, 9, 200)))
+
+    summary = download(drive)
+
+    assert summary.items[0].status == downloads.DOWNLOADED
+    assert summary.items[0].local_name == downloads.local_name("nuevo.jpg", "rc")
+    assert len(finals(download.output)) == 2
+
+
+def test_identical_copies_are_chosen_deterministically(download):
+    drive = make_drive((media_item("dup", "b.jpg", JPEG), JPEG))
+    download(drive)
+    first = downloads.local_name("b.jpg", "dup")
+    second = downloads.local_name("a.jpg", "dup")
+    # Una segunda copia válida del mismo contenido con otro nombre.
+    (download.output / second).write_bytes((download.output / first).read_bytes())
+    copied = dict(record(download.output, first), name="a.jpg", local_name=second)
+    (download.output / downloads.METADATA_DIR / f"{second}.json").write_text(
+        json.dumps(copied), encoding="utf-8"
+    )
+    drive.items["dup"]["name"] = "c.jpg"
+
+    for _ in range(2):
+        summary = download(drive)
+        assert summary.items[0].status == downloads.VERIFIED
+        assert summary.items[0].local_name == min(first, second)
+
+
+def _winerror(code, errno_value):
+    error = OSError(errno_value, "simulado")
+    error.winerror = code
+    return error
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (OSError(errno.ENOSPC, "sin espacio"), True),
+        (OSError(getattr(errno, "EDQUOT", errno.ENOSPC), "cuota de disco"), True),
+        (_winerror(112, errno.ENOSPC), True),
+        (_winerror(112, None), True),
+        (_winerror(39, errno.EINVAL), True),
+        (_winerror(1295, errno.EINVAL), True),
+        (PermissionError(errno.EACCES, "denegado"), False),
+        (OSError(errno.EINVAL, "inválido"), False),
+        (OSError(errno.EIO, "E/S"), False),
+        (_winerror(5, errno.EACCES), False),
+        (ValueError("no es E/S"), False),
+    ],
+)
+def test_disk_full_detection(error, expected):
+    assert downloads.is_disk_full(error) is expected
+
+
+def test_stop_on_disk_full_stops_after_the_affected_image(download, monkeypatch):
+    drive = make_drive(*[(media_item(f"df{i}", f"f{i}.jpg", JPEG), JPEG) for i in range(3)])
+
+    with monkeypatch.context() as patch:
+        fail_local_writes(patch, OSError(errno.ENOSPC, "No space left on device"))
+        summary = download(drive, stop_on_disk_full=True)
+
+    assert isinstance(summary.aborted, downloads.LocalDiskFullError)
+    assert summary.aborted.phase == downloads.PHASE_TEMP
+    [item] = summary.items
+    assert item.status == downloads.FAILED
+    assert item.disk_full_phase == downloads.PHASE_TEMP
+    assert len(drive.media_requests) == 1
+    assert finals(download.output) == []
+    assert_clean(download.output)
+
+
+def test_disk_full_is_still_per_image_without_the_option(download, monkeypatch):
+    drive = make_drive(*[(media_item(f"pi{i}", f"f{i}.jpg", JPEG), JPEG) for i in range(2)])
+
+    with monkeypatch.context() as patch:
+        fail_local_writes(patch, _winerror(39, errno.EINVAL))
+        summary = download(drive)
+
+    assert summary.aborted is None
+    assert summary.count(downloads.FAILED) == 2
+    assert all("espacio" in item.reason for item in summary.items)
+
+
+def test_stop_on_errors_stops_on_a_secure_connection_error(download):
+    from image_processor.google_drive.errors import DriveCertificateError, DriveSecureConnectionError
+
+    drive = make_drive(
+        (media_item("tls1", "a.jpg", JPEG), JPEG), (media_item("tls2", "b.jpg", JPEG), JPEG)
+    )
+    drive.media_failures = [ssl.SSLCertVerificationError("certificado")]
+
+    summary = download(drive, stop_on_errors=(DriveSecureConnectionError,))
+
+    assert isinstance(summary.aborted, DriveCertificateError)
+    assert [item.status for item in summary.items] == [downloads.FAILED]
+    assert len(drive.media_requests) == 1

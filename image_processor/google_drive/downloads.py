@@ -43,6 +43,24 @@ cambió en Drive durante la descarga. Solo entonces se registra el
 SHA-256 como pendiente, se publica la imagen sin sobrescribir y se
 completa el registro.
 
+Renombres
+---------
+
+Si el original solo cambió de nombre en Drive (mismo fileId, tamaño y
+MD5), se reutiliza la copia local ya registrada cuyo SHA-256 sigue
+coincidiendo con su registro: no se descarga de nuevo. La versión y la
+fecha de modificación no se exigen (son metadatos). La copia y su
+registro conservan el nombre anterior.
+
+Disco local lleno
+-----------------
+
+La falta de espacio (ENOSPC, EDQUOT o, en Windows, ERROR_DISK_FULL,
+ERROR_HANDLE_DISK_FULL y ERROR_DISK_QUOTA_EXCEEDED) se reconoce en cada
+escritura y se informa con su fase. Con stop_on_disk_full, detiene el
+lote (LocalDiskFullError); sin él, la imagen falla como cualquier otro
+error local, como siempre.
+
 No se admiten descargas concurrentes sobre la misma carpeta local.
 """
 
@@ -198,6 +216,48 @@ VERIFIED = "verified"
 RECOVERED = "recovered"
 REJECTED = "rejected"
 FAILED = "failed"
+# Solo en la vista previa: se descargaría.
+PLANNED = "planned"
+
+# Fases de escritura local (para informar una falta de espacio).
+PHASE_TEMP = "escritura del temporal"
+PHASE_PENDING_RECORD = "registro pendiente"
+PHASE_COMPLETED_RECORD = "registro completo"
+PHASE_LOCAL = "escritura local"
+
+# Falta de espacio: POSIX y, en Windows, sus códigos propios. Python
+# traduce ERROR_HANDLE_DISK_FULL (39) y ERROR_DISK_QUOTA_EXCEEDED (1295)
+# a EINVAL, así que errno no alcanza.
+_DISK_FULL_ERRNOS = frozenset(
+    code for code in (errno.ENOSPC, getattr(errno, "EDQUOT", None)) if code is not None
+)
+_DISK_FULL_WINERRORS = frozenset({39, 112, 1295})
+
+
+def is_disk_full(exc: BaseException) -> bool:
+    """¿El error local es una falta de espacio en el disco?"""
+
+    return isinstance(exc, OSError) and (
+        exc.errno in _DISK_FULL_ERRNOS
+        or getattr(exc, "winerror", None) in _DISK_FULL_WINERRORS
+    )
+
+
+class LocalDiskFullError(RuntimeError):
+    """
+    No queda espacio en el disco local: detiene el lote. Conserva la
+    imagen y la fase afectadas.
+    """
+
+    def __init__(self, file_id, name, phase):
+        self.file_id = file_id
+        self.name = name
+        self.phase = phase
+        super().__init__(
+            f"No queda espacio en el disco local ({phase}) al descargar "
+            f"{name} ({file_id}). Se detuvo la descarga; libere espacio y "
+            "vuelva a ejecutar el comando."
+        )
 
 
 @dataclass(frozen=True)
@@ -210,6 +270,8 @@ class DownloadItem:
     bytes: int = 0
     # False: el PNG se publicó, pero su registro quedó pendiente.
     registered: bool = True
+    # Fase en la que faltó espacio en el disco local, si ocurrió.
+    disk_full_phase: str | None = None
 
 
 @dataclass
@@ -217,7 +279,7 @@ class DownloadSummary:
     folder: queries.DriveFolder
     items: list[DownloadItem] = field(default_factory=list)
     temp_removed: int = 0
-    aborted: DriveError | None = None
+    aborted: DriveError | LocalDiskFullError | None = None
 
     def count(self, status: str) -> int:
         return sum(item.status == status for item in self.items)
@@ -249,9 +311,14 @@ class _LocalWriteError(_Failed):
     descarga ni cuenta como fallo de red.
     """
 
+    def __init__(self, exc: OSError, phase: str):
+        super().__init__(_local_error_message(exc))
+        self.phase = phase
+        self.disk_full = is_disk_full(exc)
+
 
 def _local_error_message(exc: OSError) -> str:
-    if exc.errno == errno.ENOSPC:
+    if is_disk_full(exc):
         detail = "no queda espacio en el disco local"
     elif isinstance(exc, PermissionError) or exc.errno in (errno.EACCES, errno.EPERM):
         detail = "permiso denegado al escribir en la carpeta local"
@@ -484,7 +551,7 @@ class _HashingWriter:
         except OSError as exc:
             # Disco lleno o permisos: no es un error de la red, aunque
             # ocurra dentro de next_chunk().
-            raise _LocalWriteError(_local_error_message(exc)) from None
+            raise _LocalWriteError(exc, PHASE_TEMP) from None
 
 
 def _verify_image(path: Path, mime: str) -> None:
@@ -528,9 +595,13 @@ def _download_to_temp(
 ):
     """Descarga por bloques a un temporal verificado. Devuelve su ruta y hashes."""
 
-    fd, tmp_name = tempfile.mkstemp(
-        dir=output_dir, prefix=f".{target}.", suffix=".tmp"
-    )
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=output_dir, prefix=f".{target}.", suffix=".tmp"
+        )
+    except OSError as exc:
+        raise _LocalWriteError(exc, PHASE_TEMP) from None
+
     tmp = Path(tmp_name)
 
     try:
@@ -596,7 +667,7 @@ def _download_to_temp(
                 file.flush()
                 os.fsync(file.fileno())
             except OSError as exc:
-                raise _LocalWriteError(_local_error_message(exc)) from None
+                raise _LocalWriteError(exc, PHASE_TEMP) from None
 
         if writer.size != info["size"]:
             raise _Failed(
@@ -645,10 +716,101 @@ def _record(file_id, folder_id, info, sha256, name, status):
     }
 
 
-def _process_image(
-    service, image, folder_id, output_dir, exists, *, max_file_bytes,
-    chunk_size, sleep, execute, downloader_factory,
-):
+@dataclass(frozen=True)
+class _Plan:
+    """
+    Qué hacer con una imagen: "verified" (ya está), "recover" (completar
+    un registro interrumpido) o "download" (descargar en name).
+    """
+
+    action: str
+    info: dict
+    name: str
+    previous: dict | None = None
+    revision: bool = False
+    reason: str | None = None
+
+
+def _check_listing(image, info) -> None:
+    """
+    El contenido no cambió desde el listado (sync): si cambió, no se
+    descarga una revisión distinta de la seleccionada.
+    """
+    changed = (
+        image.md5_checksum is not None and image.md5_checksum != info["md5_checksum"]
+    ) or (image.size is not None and image.size != info["size"])
+
+    if changed:
+        raise _Failed(
+            "el contenido del original cambió en Drive después del listado; "
+            "no se descarga una revisión distinta de la seleccionada. Vuelva "
+            "a ejecutar la sincronización."
+        )
+
+
+def _records_by_file_id(output_dir: Path) -> dict[str, list[tuple[str, dict]]]:
+    """Registros válidos de la carpeta, por fileId (para los renombres)."""
+
+    index: dict[str, list[tuple[str, dict]]] = {}
+    directory = output_dir / METADATA_DIR
+
+    if not directory.is_dir():
+        return index
+
+    for path in sorted(directory.iterdir(), key=lambda item: item.name):
+        if not path.name.endswith(".json") or not path.is_file():
+            continue
+
+        name = path.name[: -len(".json")]
+
+        try:
+            record = read_record(output_dir, name)
+        except InvalidRecordError:
+            # Se informa al consultarlo por su nombre; aquí no se usa.
+            continue
+
+        if record is not None:
+            index.setdefault(record["file_id"], []).append((name, record))
+
+    return index
+
+
+def _same_content_copy(output_dir, file_id, info, exists, records, exclude):
+    """
+    Copia local ya registrada del mismo fileId y del mismo contenido
+    (tamaño, MD5 y, si Drive lo informa, SHA-256), cuyo archivo sigue
+    coincidiendo con su SHA-256. Se prefiere un registro completo y,
+    entre varios, el de nombre menor: la elección es determinista.
+    """
+    candidates = []
+
+    for name, record in records().get(file_id, []):
+        if name in exclude:
+            continue
+
+        same_content = (
+            (record["md5_checksum"], record["size"]) == (info["md5_checksum"], info["size"])
+            and info["drive_sha256"] in (None, record["sha256"])
+        )
+        path = output_dir / name
+
+        if not same_content or not exists(name) or path.is_symlink() or not path.is_file():
+            continue
+
+        if _sha256(path) != record["sha256"]:
+            continue
+
+        candidates.append((record["status"] != COMPLETED, name, record))
+
+    return min(candidates, default=None)
+
+
+def _plan_image(
+    service, image, output_dir, exists, records, *, max_file_bytes, execute,
+    check_listing,
+) -> _Plan:
+    """Decisión sobre una imagen, sin escribir nada."""
+
     file_id = image.id
 
     try:
@@ -660,6 +822,9 @@ def _process_image(
         fileId=file_id, fields=FILE_FIELDS, supportsAllDrives=True
     ))
     info = _check_metadata(meta, file_id, max_file_bytes)
+
+    if check_listing:
+        _check_listing(image, info)
 
     base = local_name(info["name"], file_id)
     revision = revision_name(base, info["md5_checksum"])
@@ -684,8 +849,7 @@ def _process_image(
 
         if not exists(name):
             # Registrado pero ausente: se descarga de nuevo con ese nombre.
-            target, previous = name, record
-            break
+            return _Plan("download", info, name, previous=record, revision=name == revision)
 
         if _sha256(output_dir / name) != record["sha256"]:
             raise _Failed(
@@ -694,34 +858,89 @@ def _process_image(
             )
 
         if record["status"] == COMPLETED:
-            return DownloadItem(file_id, info["name"], VERIFIED, name)
+            return _Plan("verified", info, name)
 
-        record = dict(record, status=COMPLETED)
-        _write_record(output_dir, name, record)
-        return DownloadItem(
-            file_id, info["name"], RECOVERED, name,
-            reason="se completó un registro interrumpido",
+        return _Plan("recover", info, name)
+
+    # 2. ¿Solo cambió el nombre? Mismo contenido con otro nombre local.
+    copy = _same_content_copy(
+        output_dir, file_id, info, exists, records, exclude={base, revision}
+    )
+
+    if copy is not None:
+        pending, name, record = copy
+        reason = (
+            f"el original se renombró en Drive ({record['name']} -> "
+            f"{info['name']}); se reutiliza la copia local {name}, con el "
+            "mismo contenido."
+        )
+        return _Plan("recover" if pending else "verified", info, name, reason=reason)
+
+    # 3. Contenido nuevo: nombre base o, si está ocupado, revisión.
+    base_record = read_record(output_dir, base)
+
+    if base_record is None:
+        if exists(base):
+            raise _Failed(
+                f"ya existe {base} sin registro de procedencia; no se "
+                "sobrescribe ni se atribuye a este archivo."
+            )
+        return _Plan("download", info, base)
+
+    if exists(revision):
+        raise _Failed(
+            f"ya existe {revision} sin registro de procedencia; no "
+            "se sobrescribe."
         )
 
-    else:
-        # 2. Contenido nuevo: nombre base o, si está ocupado, revisión.
-        previous = None
-        base_record = read_record(output_dir, base)
+    return _Plan("download", info, revision, revision=True)
 
-        if base_record is None:
-            if exists(base):
-                raise _Failed(
-                    f"ya existe {base} sin registro de procedencia; no se "
-                    "sobrescribe ni se atribuye a este archivo."
-                )
-            target = base
-        else:
-            if exists(revision):
-                raise _Failed(
-                    f"ya existe {revision} sin registro de procedencia; no "
-                    "se sobrescribe."
-                )
-            target = revision
+
+def _preview_item(file_id, plan: _Plan) -> DownloadItem:
+    """Resultado que tendría el plan (vista previa: nada se escribe)."""
+
+    info = plan.info
+
+    if plan.action == "verified":
+        return DownloadItem(file_id, info["name"], VERIFIED, plan.name, reason=plan.reason)
+
+    if plan.action == "recover":
+        return DownloadItem(
+            file_id, info["name"], RECOVERED, plan.name,
+            reason=plan.reason or "se completaría un registro interrumpido",
+        )
+
+    reason = "se descargaría"
+    if plan.revision:
+        reason = "se descargaría como revisión nueva; se conservaría la copia anterior"
+
+    return DownloadItem(file_id, info["name"], PLANNED, plan.name, reason=reason)
+
+
+def _process_image(
+    service, image, folder_id, output_dir, exists, records, *, max_file_bytes,
+    chunk_size, sleep, execute, downloader_factory, check_listing,
+):
+    file_id = image.id
+    plan = _plan_image(
+        service, image, output_dir, exists, records,
+        max_file_bytes=max_file_bytes, execute=execute,
+        check_listing=check_listing,
+    )
+    info = plan.info
+
+    if plan.action == "verified":
+        return DownloadItem(file_id, info["name"], VERIFIED, plan.name, reason=plan.reason)
+
+    if plan.action == "recover":
+        record = dict(read_record(output_dir, plan.name), status=COMPLETED)
+        _write_record(output_dir, plan.name, record)
+        return DownloadItem(
+            file_id, info["name"], RECOVERED, plan.name,
+            reason=plan.reason or "se completó un registro interrumpido",
+        )
+
+    target, previous = plan.name, plan.previous
 
     tmp, sha256 = _download_to_temp(
         service, file_id, info, output_dir, target, chunk_size, sleep,
@@ -749,10 +968,13 @@ def _process_image(
             )
 
         # 4. Evidencia, publicación exclusiva y registro completo.
-        _write_record(
-            output_dir, target,
-            _record(file_id, folder_id, info, sha256, target, PENDING),
-        )
+        try:
+            _write_record(
+                output_dir, target,
+                _record(file_id, folder_id, info, sha256, target, PENDING),
+            )
+        except OSError as exc:
+            raise _LocalWriteError(exc, PHASE_PENDING_RECORD) from None
 
         try:
             publish_file_exclusive(tmp, output_dir / target)
@@ -772,17 +994,22 @@ def _process_image(
             pass
 
     registered = True
+    disk_full_phase = None
 
     try:
         _write_record(
             output_dir, target,
             _record(file_id, folder_id, info, sha256, target, COMPLETED),
         )
-    except OSError:
+    except OSError as exc:
+        # La imagen ya está publicada y su registro pendiente tiene el
+        # SHA-256: la próxima ejecución la recupera sin descargarla.
         registered = False
+        if is_disk_full(exc):
+            disk_full_phase = PHASE_COMPLETED_RECORD
 
     reason = None
-    if target == revision:
+    if plan.revision:
         reason = "el archivo cambió en Drive; se conservó la copia anterior"
     if not registered:
         reason = "registro pendiente: la próxima ejecución lo completará"
@@ -790,7 +1017,23 @@ def _process_image(
     return DownloadItem(
         file_id, info["name"], DOWNLOADED, target,
         reason=reason, bytes=info["size"], registered=registered,
+        disk_full_phase=disk_full_phase,
     )
+
+
+def select_images(listing: queries.ImageListing, limit: int | None = None):
+    """Imágenes del listado en el orden de las descargas, hasta limit."""
+
+    images = sorted(
+        listing.images,
+        key=lambda image: (
+            unicodedata.normalize("NFC", image.name).casefold(),
+            image.name,
+            image.id,
+        ),
+    )
+
+    return images[:limit] if limit is not None else images
 
 
 def download_folder(
@@ -806,6 +1049,11 @@ def download_folder(
     execute=None,
     downloader_factory=MediaIoBaseDownload,
     on_item=None,
+    listing: queries.ImageListing | None = None,
+    file_ids=None,
+    dry_run: bool = False,
+    stop_on_disk_full: bool = False,
+    stop_on_errors: tuple = (),
 ) -> DownloadSummary:
     """
     Descarga las imágenes admitidas de una carpeta (sin subcarpetas).
@@ -813,26 +1061,53 @@ def download_folder(
     limit cuenta las imágenes elegibles (descargadas o ya verificadas),
     en orden por nombre y fileId. Los rechazos del listado se informan
     siempre.
+
+    Para sync (GD-04):
+
+    - listing reutiliza un listado ya hecho (no se vuelve a listar) y
+      exige que el contenido de cada imagen (MD5 y tamaño) no haya
+      cambiado desde entonces;
+    - file_ids limita la descarga a esas imágenes, en el mismo orden
+      (no se combina con limit);
+    - dry_run decide qué se haría sin escribir nada (estado PLANNED para
+      lo que se descargaría);
+    - stop_on_disk_full detiene el lote si falta espacio en el disco
+      (aborted: LocalDiskFullError);
+    - stop_on_errors son errores de Drive que detienen el lote además
+      de los habituales (por ejemplo, la conexión segura fallida); la
+      imagen afectada se informa como fallida.
     """
     if limit is not None and limit < 1:
         raise ValueError("El límite debe ser al menos 1.")
+
+    if limit is not None and file_ids is not None:
+        raise ValueError("limit y file_ids no se combinan.")
 
     if max_file_bytes < 1 or chunk_size < 1:
         raise ValueError("El tamaño máximo y el de bloque deben ser positivos.")
 
     execute = execute or client.execute
     output_dir = Path(output_dir)
+    check_listing = listing is not None
 
-    listing = queries.list_images(
-        service, folder_id, originals_only=originals_only, execute=execute
-    )
-
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if listing is None:
+        listing = queries.list_images(
+            service, folder_id, originals_only=originals_only, execute=execute
+        )
 
     summary = DownloadSummary(folder=listing.folder)
-    summary.temp_removed = _remove_stale_temps(output_dir)
 
-    existing = {name_key(path.name) for path in output_dir.iterdir()}
+    if dry_run:
+        # Vista previa: ni carpetas ni limpieza de temporales.
+        existing = (
+            {name_key(path.name) for path in output_dir.iterdir()}
+            if output_dir.is_dir()
+            else set()
+        )
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        summary.temp_removed = _remove_stale_temps(output_dir)
+        existing = {name_key(path.name) for path in output_dir.iterdir()}
 
     def exists(name: str) -> bool:
         return name_key(name) in existing or (output_dir / name).exists()
@@ -845,36 +1120,52 @@ def download_folder(
     for skipped in listing.skipped:
         report(DownloadItem(skipped.id, skipped.name, REJECTED, reason=skipped.reason))
 
-    images = sorted(
-        listing.images,
-        key=lambda image: (
-            unicodedata.normalize("NFC", image.name).casefold(),
-            image.name,
-            image.id,
-        ),
-    )
+    if file_ids is None:
+        images = select_images(listing, limit)
+    else:
+        wanted = set(file_ids)
+        images = [image for image in select_images(listing) if image.id in wanted]
 
-    if limit is not None:
-        images = images[:limit]
+    # Índice de registros por fileId, solo si hace falta (renombres).
+    index = {}
+
+    def records():
+        if "value" not in index:
+            index["value"] = _records_by_file_id(output_dir)
+        return index["value"]
 
     consecutive_transient = 0
 
     for image in images:
         try:
-            item = _process_image(
-                service, image, listing.folder.id, output_dir, exists,
-                max_file_bytes=max_file_bytes, chunk_size=chunk_size,
-                sleep=sleep, execute=execute,
-                downloader_factory=downloader_factory,
-            )
+            if dry_run:
+                item = _preview_item(image.id, _plan_image(
+                    service, image, output_dir, exists, records,
+                    max_file_bytes=max_file_bytes, execute=execute,
+                    check_listing=check_listing,
+                ))
+            else:
+                item = _process_image(
+                    service, image, listing.folder.id, output_dir, exists, records,
+                    max_file_bytes=max_file_bytes, chunk_size=chunk_size,
+                    sleep=sleep, execute=execute,
+                    downloader_factory=downloader_factory,
+                    check_listing=check_listing,
+                )
         except _Rejected as exc:
             item = DownloadItem(image.id, image.name, REJECTED, reason=str(exc))
+        except _LocalWriteError as exc:
+            item = DownloadItem(
+                image.id, image.name, FAILED, reason=str(exc),
+                disk_full_phase=exc.phase if exc.disk_full else None,
+            )
         except _Failed as exc:
             item = DownloadItem(image.id, image.name, FAILED, reason=str(exc))
         except OSError as exc:
             # Errores locales (disco lleno, permisos): sin publicar nada.
             item = DownloadItem(
-                image.id, image.name, FAILED, reason=_local_error_message(exc)
+                image.id, image.name, FAILED, reason=_local_error_message(exc),
+                disk_full_phase=PHASE_LOCAL if is_disk_full(exc) else None,
             )
         except (DriveAuthError, DriveQuotaError) as exc:
             # Autorización o cuota agotada: afectan a todo el lote. No es
@@ -883,6 +1174,11 @@ def download_folder(
             break
         except DriveError as exc:
             item = DownloadItem(image.id, image.name, FAILED, reason=str(exc))
+
+            if stop_on_errors and isinstance(exc, stop_on_errors):
+                report(item)
+                summary.aborted = exc
+                break
 
             if isinstance(exc, DriveTransientError):
                 consecutive_transient += 1
@@ -901,5 +1197,11 @@ def download_folder(
 
         consecutive_transient = 0
         report(item)
+
+        if stop_on_disk_full and item.disk_full_phase is not None:
+            summary.aborted = LocalDiskFullError(
+                item.file_id, item.name, item.disk_full_phase
+            )
+            break
 
     return summary

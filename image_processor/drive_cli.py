@@ -9,6 +9,7 @@ Consulta y descarga de solo lectura de Google Drive.
     python -m image_processor.drive_cli auth-write
     python -m image_processor.drive_cli create-upload-folder --name NOMBRE
     python -m image_processor.drive_cli upload --folder-id ID --input DIR --limit N [--dry-run]
+    python -m image_processor.drive_cli sync --folder-id ID --downloads DIR --output DIR --target-folder-id ID (--limit N | --all) [--dry-run]
     python -m image_processor.drive_cli logout [--write]
 
 process-local trabaja solo con archivos locales: no se conecta a
@@ -16,6 +17,10 @@ Drive ni lee la autorización.
 
 auth-write y upload usan una autorización de escritura separada
 (drive.file, en token_write.json). La de solo lectura no se modifica.
+
+sync (GD-04) coordina download, process-local y upload con un único
+plan por ejecución. No se admiten ejecuciones concurrentes sobre las
+mismas carpetas locales.
 
 Códigos de salida:
 
@@ -36,9 +41,13 @@ Códigos de salida:
 8  process-local: el manifiesto del destino está dañado o el destino
    contiene resultados de otra carpeta de Drive; no se procesó nada.
    upload: el manifiesto de los resultados está dañado; no se subió nada.
+   sync: el manifiesto está dañado o es de otra carpeta de Drive.
+9  sync: no queda espacio en el disco local; se detuvo la descarga.
 
-En upload, 3 incluye la autorización de escritura ausente o revocada
-y 4 una carpeta de destino sin acceso para drive.file.
+En upload y sync, 3 incluye la autorización de escritura ausente o
+revocada y 4 una carpeta de destino sin acceso para drive.file. En sync,
+6 indica imágenes fallidas o pendientes de confirmar, y 7 y 8 se
+informan después de las etapas que sí terminaron.
 """
 
 import argparse
@@ -48,7 +57,7 @@ from pathlib import Path
 
 from . import batch
 from .background_removal import SUPPORTED_MODELS, ModelInitializationError
-from .google_drive import auth, client, downloads, local_processing, queries, uploads
+from .google_drive import auth, client, downloads, local_processing, queries, sync, uploads
 from .google_drive.errors import (
     DriveAccessError,
     DriveAuthError,
@@ -200,6 +209,7 @@ def _command_list_images(args) -> int:
 
 
 _LABELS = {
+    downloads.PLANNED: "[SE DESCARGARÍA]",
     downloads.DOWNLOADED: "[OK]",
     downloads.VERIFIED: "[VERIFICADA]",
     downloads.RECOVERED: "[RECUPERADA]",
@@ -305,9 +315,7 @@ def _is_inside(path: Path, directory: Path) -> bool:
 
 
 def _command_process_local(args) -> int:
-    options = OutputOptions(
-        width=args.width, height=args.height, background=args.background
-    )
+    options = _output_options(args)
 
     if args.limit is not None and args.limit < 1:
         raise ValueError("--limit debe ser al menos 1.")
@@ -491,9 +499,7 @@ _UPLOAD_LABELS = {
 
 
 def _command_upload(args) -> int:
-    options = OutputOptions(
-        width=args.width, height=args.height, background=args.background
-    )
+    options = _output_options(args)
 
     if args.limit < 1:
         raise ValueError("--limit debe ser al menos 1.")
@@ -616,6 +622,253 @@ def _command_upload(args) -> int:
     return 0
 
 
+_SYNC_LABELS = {
+    sync.COMPLETE: "[COMPLETA]",
+    sync.PLANNED: "[PLANIFICADA]",
+    sync.FAILED: "[ERROR]",
+    sync.PENDING: "[PENDIENTE]",
+    sync.NOT_STARTED: "[NO INICIADA]",
+}
+
+_STAGE_NAMES = {
+    sync.DOWNLOAD: "descarga",
+    sync.PROCESSING: "procesamiento",
+    sync.UPLOAD: "subida",
+}
+
+_RELATED_NAMES = {
+    uploads.PREVIOUS_REVISION: "de una revisión anterior",
+    uploads.OTHER_CONFIGURATION: "de otra configuración",
+    uploads.OTHER_COPY: "otra copia del mismo resultado",
+}
+
+
+def _stop_code(exc: BaseException) -> int:
+    """Código de salida de la etapa que detuvo la sincronización."""
+
+    if isinstance(exc, downloads.LocalDiskFullError):
+        return 9
+    if isinstance(exc, ModelInitializationError):
+        return 7
+    if isinstance(exc, (ManifestError, local_processing.ForeignFolderError)):
+        return 8
+    if isinstance(exc, DriveAuthError):
+        return 3
+    if isinstance(exc, (DriveAccessError, DriveNotFoundError, DriveNotAFolderError)):
+        return 4
+    if isinstance(exc, DriveTransientError):
+        return 5
+    return 1
+
+
+def _show_sync_event(stage, *details):
+    """Progreso de cada etapa, con las etiquetas de su propio comando."""
+
+    if stage == sync.DOWNLOAD:
+        (item,) = details
+        if item.status == downloads.REJECTED and item.file_id is None:
+            return
+        line = f"[descarga] {_LABELS[item.status]} {item.name or '?'} ({item.file_id or '?'})"
+        failed = item.status == downloads.FAILED
+    elif stage == sync.PROCESSING:
+        source, item = details
+        line = f"[procesamiento] {_PROCESS_LABELS[item.status]} {source.remote_name} ({source.file_id})"
+        failed = item.status in (batch.FAILED, batch.SEGMENTATION_FAILED)
+    else:
+        (item,) = details
+        line = f"[subida] {_UPLOAD_LABELS[item.status]} {item.output_name}"
+        if item.remote_name:
+            line += f" -> {item.remote_name}"
+        failed = item.status in (uploads.FAILED, uploads.UNCERTAIN)
+
+    print(line, file=sys.stderr if failed else sys.stdout)
+
+
+def _command_sync(args) -> int:
+    options = _output_options(args)
+    limit = None if args.all else args.limit
+
+    if limit is not None and limit < 1:
+        raise ValueError("--limit debe ser al menos 1.")
+
+    if not 0 < args.max_file_mb <= 1024:
+        raise ValueError("--max-file-mb debe estar entre 0 y 1024.")
+
+    queries.validate_file_id(args.folder_id)
+    queries.validate_file_id(args.target_folder_id)
+
+    secrets = auth.secret_paths(args.secrets_dir).directory
+
+    for label, path in (("--downloads", args.downloads), ("--output", args.output)):
+        if _is_inside(path, secrets):
+            raise ValueError(
+                f"{label} no puede estar dentro de la carpeta de secretos ({secrets})."
+            )
+
+    # La vista previa no guarda tokens renovados; una ejecución real sí.
+    persist = not args.dry_run
+    _, read_service = _connect(args.secrets_dir, persist=persist)
+
+    try:
+        _, write_service = _connect(args.secrets_dir, profile=auth.WRITE, persist=persist)
+    except DriveAuthError as exc:
+        if not args.dry_run:
+            raise
+        write_service = None
+        print(
+            f"[AVISO] {exc} La vista previa continúa sin comprobar el "
+            "acceso de escritura."
+        )
+
+    print("\nSincronización con Google Drive")
+    print(f"Carpeta de los originales: {args.folder_id}")
+    print(f"Destino: {args.target_folder_id}")
+    print(f"Descargas: {args.downloads}")
+    print(f"Resultados: {args.output}")
+    print(
+        f"Resultado: {options.width} x {options.height} px, fondo "
+        f"{options.background}, modelo {args.model}"
+    )
+    print(f"Selección: {'todas las imágenes' if limit is None else f'hasta {limit}'}")
+
+    if args.dry_run:
+        print(
+            "VISTA PREVIA: no se escribe nada en Drive ni en disco y no se "
+            "inicializa el modelo."
+        )
+
+    print()
+
+    try:
+        summary = sync.sync(
+            read_service,
+            write_service,
+            folder_id=args.folder_id,
+            downloads_dir=args.downloads,
+            output_dir=args.output,
+            target_folder_id=args.target_folder_id,
+            limit=limit,
+            model_name=args.model,
+            options=options,
+            max_file_bytes=int(args.max_file_mb * downloads.MIB),
+            dry_run=args.dry_run,
+            on_event=_show_sync_event,
+        )
+    except (ManifestError, local_processing.ForeignFolderError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        print("No se inició ninguna etapa.", file=sys.stderr)
+        return 8
+    except NotADirectoryError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+
+    print(f"\nCarpeta: {summary.folder.name} ({summary.folder.id})")
+    print(f"Destino: {summary.target.folder.name} ({summary.target.folder.id})")
+    print("\n===== PLAN =====")
+
+    for item in summary.plan:
+        line = f"{_SYNC_LABELS[item.status]} {item.original.name} ({item.file_id})"
+
+        if item.status in (sync.FAILED, sync.PENDING, sync.NOT_STARTED) and item.stage:
+            line += f" en {_STAGE_NAMES[item.stage]}"
+        if item.reason:
+            line += f": {item.reason}"
+        if item.actions:
+            line += " — se haría: " + ", ".join(_STAGE_NAMES[stage] for stage in item.actions)
+        if item.undetermined:
+            line += (
+                " — no determinable sin ejecutar: "
+                + ", ".join(_STAGE_NAMES[stage] for stage in item.undetermined)
+            )
+
+        failed = item.status in (sync.FAILED, sync.PENDING)
+        print(line, file=sys.stderr if failed else sys.stdout)
+
+        for note in item.notes:
+            print(f"    - {note}")
+
+        for related in item.related:
+            print(
+                f"    - En Drive hay un PNG {_RELATED_NAMES[related.kind]}: "
+                f"{related.name} ({related.id}). No se modifica ni se elimina."
+            )
+
+    undetermined = sum(bool(item.undetermined) for item in summary.plan)
+    uploaded = summary.upload.count(uploads.UPLOADED) if summary.upload else 0
+
+    print("\n===== RESUMEN DE LA SINCRONIZACIÓN =====")
+    print(f"Originales seleccionados:   {len(summary.plan)}")
+    print(f"Completos (en Drive):       {summary.count(sync.COMPLETE)}")
+
+    if args.dry_run:
+        print(f"Con acciones planificadas:  {summary.count(sync.PLANNED)}")
+        print(f"No determinables:           {undetermined}")
+    else:
+        print(f"PNG subidos ahora:          {uploaded}")
+
+    print(f"Fallidos:                   {summary.count(sync.FAILED)}")
+    print(f"Pendientes de confirmar:    {summary.count(sync.PENDING)}")
+    print(f"No iniciados:               {summary.count(sync.NOT_STARTED)}")
+
+    if args.dry_run:
+        access = {True: "verificado", False: "sin acceso", None: "no verificado"}
+        print(f"Permiso de escritura (drive.file): {access[summary.target.write_access]}")
+        print(f"\n[AVISO] {summary.target.note}")
+        print(
+            "La vista previa no garantiza el resultado: lo que depende de "
+            "una descarga o un procesamiento se sabrá al ejecutarlos."
+        )
+
+    if summary.warnings:
+        print("\nAdvertencias (no afectan el resultado):")
+        for warning in summary.warnings:
+            print(f"  - {warning}")
+
+    if summary.stopped is not None:
+        print(
+            f"\n[ERROR] La sincronización se detuvo en "
+            f"{_STAGE_NAMES[summary.stopped_stage]}: {summary.stopped}",
+            file=sys.stderr,
+        )
+        print("Las etapas siguientes no se iniciaron.", file=sys.stderr)
+        return _stop_code(summary.stopped)
+
+    if not summary.complete:
+        print(
+            "\nSincronización parcial: revise las imágenes fallidas o "
+            "pendientes y vuelva a ejecutar el comando."
+        )
+        return 6
+
+    return 0
+
+
+def _add_output_options(parser) -> None:
+    """Modelo, fondo y dimensiones: las mismas en todos los comandos."""
+
+    parser.add_argument(
+        "--model", choices=SUPPORTED_MODELS,
+        default=local_processing.DEFAULT_MODEL,
+        help=f"Modelo de eliminación de fondo (por defecto, {local_processing.DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--background", choices=BACKGROUNDS, default=DEFAULT_BACKGROUND,
+        help=f"Fondo del resultado (por defecto, {DEFAULT_BACKGROUND})",
+    )
+    parser.add_argument(
+        "--width", type=int, default=DEFAULT_WIDTH,
+        help=f"Ancho en píxeles, entre {MIN_SIDE} y {MAX_SIDE} (por defecto, {DEFAULT_WIDTH})",
+    )
+    parser.add_argument(
+        "--height", type=int, default=DEFAULT_HEIGHT,
+        help=f"Alto en píxeles, entre {MIN_SIDE} y {MAX_SIDE} (por defecto, {DEFAULT_HEIGHT})",
+    )
+
+
+def _output_options(args) -> OutputOptions:
+    return OutputOptions(width=args.width, height=args.height, background=args.background)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Consulta de solo lectura de Google Drive"
@@ -729,23 +982,7 @@ def main(argv: list[str] | None = None) -> int:
         "--output", type=Path, required=True,
         help="Carpeta de resultados (puede ser la misma)",
     )
-    process.add_argument(
-        "--model", choices=SUPPORTED_MODELS,
-        default=local_processing.DEFAULT_MODEL,
-        help=f"Modelo de eliminación de fondo (por defecto, {local_processing.DEFAULT_MODEL})",
-    )
-    process.add_argument(
-        "--background", choices=BACKGROUNDS, default=DEFAULT_BACKGROUND,
-        help=f"Fondo del resultado (por defecto, {DEFAULT_BACKGROUND})",
-    )
-    process.add_argument(
-        "--width", type=int, default=DEFAULT_WIDTH,
-        help=f"Ancho en píxeles, entre {MIN_SIDE} y {MAX_SIDE} (por defecto, {DEFAULT_WIDTH})",
-    )
-    process.add_argument(
-        "--height", type=int, default=DEFAULT_HEIGHT,
-        help=f"Alto en píxeles, entre {MIN_SIDE} y {MAX_SIDE} (por defecto, {DEFAULT_HEIGHT})",
-    )
+    _add_output_options(process)
     process.add_argument(
         "--limit", type=int, default=None,
         help="Máximo de imágenes a procesar o verificar (para pruebas)",
@@ -779,28 +1016,56 @@ def main(argv: list[str] | None = None) -> int:
         "--limit", type=int, required=True,
         help="Máximo de PNG a subir o verificar (obligatorio)",
     )
-    upload.add_argument(
-        "--model", choices=SUPPORTED_MODELS,
-        default=uploads.DEFAULT_MODEL,
-        help=f"Modelo con el que se generaron (por defecto, {uploads.DEFAULT_MODEL})",
-    )
-    upload.add_argument(
-        "--background", choices=BACKGROUNDS, default=DEFAULT_BACKGROUND,
-        help=f"Fondo de los resultados (por defecto, {DEFAULT_BACKGROUND})",
-    )
-    upload.add_argument(
-        "--width", type=int, default=DEFAULT_WIDTH,
-        help=f"Ancho de los resultados (por defecto, {DEFAULT_WIDTH})",
-    )
-    upload.add_argument(
-        "--height", type=int, default=DEFAULT_HEIGHT,
-        help=f"Alto de los resultados (por defecto, {DEFAULT_HEIGHT})",
-    )
+    _add_output_options(upload)
     upload.add_argument(
         "--dry-run", action="store_true",
         help="Muestra qué se subiría sin escribir nada en Drive",
     )
     upload.set_defaults(handler=_command_upload)
+
+    synchronize = commands.add_parser(
+        "sync",
+        help=(
+            "Sincroniza una carpeta: descarga, procesa y sube solo lo que "
+            "falta (sin crear carpetas)"
+        ),
+    )
+    synchronize.add_argument(
+        "--folder-id", required=True,
+        help="ID de la carpeta de Drive de los originales",
+    )
+    synchronize.add_argument(
+        "--downloads", type=Path, required=True,
+        help="Carpeta local de descargas (GD-02)",
+    )
+    synchronize.add_argument(
+        "--output", type=Path, required=True,
+        help="Carpeta local de resultados (GD-03A)",
+    )
+    synchronize.add_argument(
+        "--target-folder-id", required=True,
+        help="Carpeta de Drive de destino; debe existir y ser accesible para drive.file",
+    )
+    selection = synchronize.add_mutually_exclusive_group(required=True)
+    selection.add_argument(
+        "--limit", type=int, default=None,
+        help="Máximo de originales a sincronizar, en orden por nombre y fileId",
+    )
+    selection.add_argument(
+        "--all", action="store_true",
+        help="Sincroniza todos los originales de la carpeta",
+    )
+    _add_output_options(synchronize)
+    synchronize.add_argument(
+        "--max-file-mb", type=float,
+        default=downloads.DEFAULT_MAX_FILE_BYTES / downloads.MIB,
+        help="Tamaño máximo por imagen en MiB (por defecto, 25)",
+    )
+    synchronize.add_argument(
+        "--dry-run", action="store_true",
+        help="Muestra qué se haría sin escribir nada ni inicializar el modelo",
+    )
+    synchronize.set_defaults(handler=_command_sync)
 
     args = parser.parse_args(argv)
 

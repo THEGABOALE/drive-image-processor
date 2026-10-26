@@ -330,16 +330,70 @@ def _read_png(path: Path, root: Path) -> bytes:
     return path.read_bytes()
 
 
+def _candidate_problem(entry: ManifestEntry, path: Path, root: Path) -> str | None:
+    """Motivo por el que el PNG local de entry no se puede subir, o None."""
+
+    try:
+        return _png_problem(_read_png(path, root), entry)
+    except _Rejected as exc:
+        return str(exc)
+    except OSError:
+        return "no se pudo leer el PNG; no se sube."
+
+
+def _select_authorized(manifest, input_dir, root, folder_id, authorized, selection):
+    """Solo los resultados autorizados, exactos y en su orden (sync)."""
+
+    for file_id, output_name, identity in authorized:
+        entry = manifest.get(output_name)
+        problem = None
+
+        if (
+            entry is None
+            or entry.source.kind != DRIVE_KIND
+            or entry.source.id != file_id
+            or entry.identity != identity
+        ):
+            problem = (
+                "el resultado autorizado no figura en el manifiesto con la "
+                "identidad esperada; no se sube otro en su lugar."
+            )
+        elif entry.source.drive.folder_id != folder_id:
+            problem = (
+                f"corresponde a otra carpeta de Drive "
+                f"({entry.source.drive.folder_id}); no se sube."
+            )
+        elif entry.status != COMPLETED:
+            problem = "su registro de GD-03A quedó pendiente; no se sube."
+        else:
+            problem = _candidate_problem(entry, input_dir / entry.output_name, root)
+
+        if problem is not None:
+            selection.rejected.append(
+                UploadItem(file_id, output_name, REJECTED, reason=problem)
+            )
+        else:
+            selection.candidates.append(Candidate(entry, input_dir / entry.output_name))
+
+    return selection
+
+
 def select_results(
     input_dir: Path,
     folder_id: str,
     model_name: str = DEFAULT_MODEL,
     options: OutputOptions | None = None,
+    authorized=None,
 ) -> Selection:
     """
     PNG de GD-03A que se pueden subir, en el orden de GD-02 (nombre
     remoto y fileId). Solo lee archivos locales. Un manifiesto dañado
     lanza ManifestError.
+
+    authorized (sync, GD-04) es una lista de tríos (fileId, nombre del
+    PNG, ResultIdentity): solo se consideran esas entradas exactas del
+    manifiesto, en ese orden, sin elegir la revisión por versión. El
+    resto del manifiesto y de la carpeta no se informa.
     """
     options = options or OutputOptions()
     queries.validate_file_id(folder_id)
@@ -352,6 +406,11 @@ def select_results(
     root = input_dir.resolve()
     known = manifest.known_names()
     selection = Selection()
+
+    if authorized is not None:
+        return _select_authorized(
+            manifest, input_dir, root, folder_id, authorized, selection
+        )
 
     def reject(name, reason, file_id=None):
         selection.rejected.append(UploadItem(file_id, name, REJECTED, reason=reason))
@@ -427,13 +486,7 @@ def select_results(
 
         entry = group[0]
         path = input_dir / entry.output_name
-
-        try:
-            problem = _png_problem(_read_png(path, root), entry)
-        except _Rejected as exc:
-            problem = str(exc)
-        except OSError:
-            problem = "no se pudo leer el PNG; no se sube."
+        problem = _candidate_problem(entry, path, root)
 
         if problem is not None:
             reject(entry.output_name, problem, file_id)
@@ -1084,6 +1137,151 @@ def _upload_one(ctx: _Context, candidate: Candidate) -> UploadItem:
     return _create_and_verify(ctx, candidate, data, expected, remote_id, name, path)
 
 
+@dataclass(frozen=True)
+class TargetAccess:
+    folder: queries.DriveFolder
+    # True: acceso de escritura comprobado; False: sin acceso (solo en la
+    # vista previa); None: no se comprobó.
+    write_access: bool | None
+    note: str | None
+    # Credencial para consultar los PNG propios: drive.file si hay acceso.
+    own: object
+
+
+def check_target(
+    read_service,
+    write_service,
+    target_folder_id: str,
+    *,
+    dry_run: bool = False,
+    execute=None,
+) -> TargetAccess:
+    """
+    Comprueba la carpeta de destino antes de subir (o de sincronizar).
+
+    En una subida real exige el acceso de escritura de drive.file
+    (DriveWriteAccessError si no lo hay). En la vista previa lo informa
+    sin exigirlo. Solo consulta: no crea ni modifica nada.
+    """
+    execute = execute or client.execute
+    queries.validate_file_id(target_folder_id)
+    folder = queries.get_folder(read_service, target_folder_id, execute=execute)
+
+    ctx = _Context(
+        read=read_service,
+        own=write_service or read_service,
+        write=write_service,
+        execute=execute,
+        target=folder,
+        folder_id=target_folder_id,
+        input_dir=Path("."),
+        names=set(),
+        chunk_size=DEFAULT_CHUNK_SIZE,
+        sleep=time.sleep,
+        dry_run=dry_run,
+    )
+
+    if write_service is not None and not dry_run:
+        # Subida real: sin acceso comprobado no se crea nada.
+        _check_write_access(ctx)
+        return TargetAccess(folder, True, None, ctx.own)
+
+    if write_service is not None:
+        # Vista previa: el acceso se informa, no se exige.
+        try:
+            _check_write_access(ctx)
+        except (DriveWriteAccessError, DriveAuthError) as exc:
+            access = False if isinstance(exc, DriveWriteAccessError) else None
+            note = (
+                f"{exc} La subida real se detendría sin subir nada."
+                if access is False
+                else f"El permiso de escritura no se verificó: {exc}"
+            )
+            # Sin acceso de escritura, las consultas usan la de lectura.
+            return TargetAccess(folder, access, note, read_service)
+
+        return TargetAccess(
+            folder, True,
+            "La autorización drive.file tiene acceso a la carpeta de "
+            "destino. Aun así, la vista previa no garantiza que Google "
+            "acepte la subida.",
+            ctx.own,
+        )
+
+    return TargetAccess(
+        folder, None,
+        "El permiso de escritura no se verificó: no hay una "
+        f"autorización drive.file válida ({AUTH_WRITE_COMMAND}). La "
+        "vista previa no garantiza que Google acepte la subida.",
+        read_service,
+    )
+
+
+# PNG remotos relacionados (informe, solo lectura) -------------------------
+
+PREVIOUS_REVISION = "previous_revision"
+OTHER_CONFIGURATION = "other_configuration"
+OTHER_COPY = "other_copy"
+
+
+@dataclass(frozen=True)
+class RemoteResult:
+    """Otro PNG de la aplicación para el mismo original (no se modifica)."""
+
+    id: str
+    name: str
+    kind: str
+
+
+def remote_results_by_source(service, target_folder_id: str, *, execute=None) -> dict:
+    """
+    PNG de la aplicación en la carpeta de destino, por fileId del
+    original (appProperties). Solo lee.
+    """
+    execute = execute or client.execute
+    queries.validate_file_id(target_folder_id)
+    grouped: dict[str, list[dict]] = {}
+
+    for item in _list(
+        service, execute,
+        f"'{target_folder_id}' in parents and trashed = false",
+        "id, name, appProperties",
+    ):
+        source = (item.get("appProperties") or {}).get(PROP_SOURCE_FILE_ID)
+        if source:
+            grouped.setdefault(source, []).append(item)
+
+    return grouped
+
+
+def related_remote_results(entry: ManifestEntry, target_folder_id: str, items) -> list[RemoteResult]:
+    """
+    Los PNG remotos del mismo original que no son el resultado vigente
+    de entry: de una revisión anterior, de otra configuración u otra
+    copia. Se informan; nunca se modifican ni se eliminan.
+    """
+    key = upload_key(entry, target_folder_id)
+    config = _app_properties(entry, key)[PROP_CONFIG]
+    related = []
+
+    for item in items:
+        properties = item.get("appProperties") or {}
+
+        if properties.get(PROP_UPLOAD_KEY) == key:
+            continue
+
+        if properties.get(PROP_SOURCE_SHA256) != entry.source.sha256:
+            kind = PREVIOUS_REVISION
+        elif properties.get(PROP_CONFIG) != config:
+            kind = OTHER_CONFIGURATION
+        else:
+            kind = OTHER_COPY
+
+        related.append(RemoteResult(item["id"], item.get("name") or "", kind))
+
+    return sorted(related, key=lambda result: (result.kind, result.name, result.id))
+
+
 def upload_results(
     read_service,
     write_service,
@@ -1099,10 +1297,14 @@ def upload_results(
     sleep=None,
     execute=None,
     on_item=None,
+    authorized=None,
 ) -> UploadSummary:
     """
     Sube los PNG verificados de input_dir cuyo original es de
     folder_id, a target_folder_id (por defecto, la misma carpeta).
+
+    authorized (sync, GD-04): solo esas entradas exactas del manifiesto
+    (ver select_results). No se combina con limit.
 
     write_service puede ser None solo en la vista previa. limit cuenta
     los PNG que se pueden subir, en el orden de GD-02; los rechazos se
@@ -1114,6 +1316,9 @@ def upload_results(
     """
     if limit is not None and limit < 1:
         raise ValueError("El límite debe ser al menos 1.")
+
+    if limit is not None and authorized is not None:
+        raise ValueError("limit y authorized no se combinan.")
 
     if write_service is None and not dry_run:
         raise DriveAuthError(
@@ -1128,15 +1333,23 @@ def upload_results(
     queries.validate_file_id(target_folder_id)
     input_dir = Path(input_dir)
 
-    selection = select_results(input_dir, folder_id, model_name, options)
+    selection = select_results(
+        input_dir, folder_id, model_name, options, authorized=authorized
+    )
     candidates = selection.candidates[:limit] if limit is not None else selection.candidates
 
     summary = UploadSummary(source_folder_id=folder_id)
-    summary.target = queries.get_folder(read_service, target_folder_id, execute=execute)
+    access = check_target(
+        read_service, write_service, target_folder_id,
+        dry_run=dry_run, execute=execute,
+    )
+    summary.target = access.folder
+    summary.write_access = access.write_access
+    summary.write_access_note = access.note
 
     ctx = _Context(
         read=read_service,
-        own=write_service or read_service,
+        own=access.own,
         write=write_service,
         execute=execute,
         target=summary.target,
@@ -1147,39 +1360,6 @@ def upload_results(
         sleep=sleep,
         dry_run=dry_run,
     )
-
-    if write_service is not None and not dry_run:
-        # Subida real: sin acceso comprobado no se crea nada.
-        _check_write_access(ctx)
-        summary.write_access = True
-
-    elif write_service is not None:
-        # Vista previa: el acceso se informa, no se exige.
-        try:
-            _check_write_access(ctx)
-        except (DriveWriteAccessError, DriveAuthError) as exc:
-            summary.write_access = False if isinstance(exc, DriveWriteAccessError) else None
-            summary.write_access_note = (
-                f"{exc} La subida real se detendría sin subir nada."
-                if summary.write_access is False
-                else f"El permiso de escritura no se verificó: {exc}"
-            )
-            # Sin acceso de escritura, las consultas usan la de lectura.
-            ctx.own = read_service
-        else:
-            summary.write_access = True
-            summary.write_access_note = (
-                "La autorización drive.file tiene acceso a la carpeta de "
-                "destino. Aun así, la vista previa no garantiza que Google "
-                "acepte la subida."
-            )
-
-    else:
-        summary.write_access_note = (
-            "El permiso de escritura no se verificó: no hay una "
-            f"autorización drive.file válida ({AUTH_WRITE_COMMAND}). La "
-            "vista previa no garantiza que Google acepte la subida."
-        )
 
     # Todos los nombres del destino, también los ajenos (credencial de lectura).
     ctx.names = {
