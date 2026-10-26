@@ -371,11 +371,26 @@ def _processing_stage(ctx, summary):
             item.fail(PROCESSING, "no se obtuvo un resultado verificado.")
 
     # Advertencias: lo que no pertenece al plan no cambia el resultado.
+    # Las copias seleccionadas con problemas ya figuran como fallidas.
     listed = {image.id for image in ctx.listing.images}
-    loose = [excluded for excluded in result.discovery.rejected if excluded.file_id not in by_id]
+    selected_names = {item.revision.local_name for item in ready}
+    others = [
+        excluded for excluded in result.discovery.rejected
+        if excluded.name not in selected_names
+    ]
+    copies = [excluded for excluded in others if excluded.file_id in by_id]
+    loose = [excluded for excluded in others if excluded.file_id not in by_id]
     gone = sorted({
         source.file_id for source in result.discovery.valid if source.file_id not in listed
     })
+
+    if copies:
+        summary.warnings.append(
+            f"{len(copies)} otra(s) copia(s) local(es) de originales del plan "
+            "no se usaron (revisiones anteriores alteradas o copias "
+            "duplicadas); se procesa solo la copia verificada en esta "
+            "ejecución y las demás no se modifican."
+        )
 
     if loose:
         summary.warnings.append(

@@ -1070,3 +1070,74 @@ def test_selection_only_counts_its_own_rejections(remote, dirs):
 def test_selection_and_limit_do_not_combine(dirs):
     with pytest.raises(ValueError):
         run(dirs, limit=1, selection=[])
+
+
+# D1: la selección explícita y las otras copias del mismo fileId -----------
+
+def two_revisions(remote, dirs, file_id):
+    remote.add(file_id, "producto.jpg", product(color=(200, 20, 20)), version="1")
+    remote.download(dirs.input)
+    remote.change(file_id, product(color=(20, 20, 200)), version="2")
+    remote.download(dirs.input)
+    old = local_name(file_id, "producto.jpg")
+    [current] = [name for name in image_files(dirs.input) if ".rev-" in name]
+    return old, current
+
+
+def test_selection_ignores_rejections_of_other_copies_of_the_same_file(remote, dirs):
+    old, current = two_revisions(remote, dirs, "1Copias")
+    (dirs.input / old).write_bytes(b"revision anterior alterada")
+
+    result = run(dirs, selection=[("1Copias", current)])
+
+    assert result.complete
+    assert [source.path.name for source in result.selected] == [current]
+    assert result.rejected == [] and result.unavailable == []
+    # El rechazo de la otra copia se conserva como diagnóstico.
+    assert [(item.name, item.file_id) for item in result.discovery.rejected] == [(old, "1Copias")]
+    assert result.batch.processed == 1
+    entries = manifest_document(dirs.output)["entries"]
+    assert [entry["source"]["drive"]["local_name"] for entry in entries] == [current]
+
+
+def _alter(dirs, name):
+    (dirs.input / name).write_bytes(b"alterada")
+
+
+def _damage_record(dirs, name):
+    (dirs.input / downloads.METADATA_DIR / f"{name}.json").write_text("{dañado", "utf-8")
+
+
+def _drop_record(dirs, name):
+    (dirs.input / downloads.METADATA_DIR / f"{name}.json").unlink()
+
+
+def _drop_file(dirs, name):
+    (dirs.input / name).unlink()
+
+
+@pytest.mark.parametrize(
+    "damage, reason",
+    [
+        (_alter, "no coincide"),
+        (_damage_record, "dañado"),
+        (_drop_record, "registro de procedencia"),
+        (_drop_file, "no está disponible"),
+    ],
+    ids=["bytes", "registro-dañado", "sin-registro", "sin-archivo"],
+)
+def test_invalid_selected_copy_is_never_successful(remote, dirs, damage, reason):
+    old, current = two_revisions(remote, dirs, "1Invalida")
+    damage(dirs, current)
+
+    result = run(dirs, selection=[("1Invalida", current)])
+
+    assert not result.complete
+    assert result.selected == []
+    [missing] = result.unavailable
+    assert (missing.name, missing.file_id) == (current, "1Invalida")
+    assert reason in missing.reason
+    assert result.rejected == [missing]
+    # La revisión anterior, válida, no se procesa en su lugar.
+    assert result.batch.processed == 0
+    assert pngs(dirs.output) == []

@@ -135,8 +135,9 @@ class LocalProcessingResult:
     selected: list[DriveSource]
     batch: batch.BatchResult
     prepared: list[PreparedResult]
-    # Con una selección explícita: las descargas pedidas que no están o
-    # no son válidas, y los rechazos que corresponden a la selección.
+    # Con una selección explícita: las copias pedidas que no están o no
+    # son válidas (las únicas que cuentan; los rechazos de otras copias
+    # quedan en discovery como diagnóstico).
     unavailable: list[Excluded] = field(default_factory=list)
     scoped_rejected: list[Excluded] | None = None
 
@@ -513,9 +514,13 @@ def process_downloads(
 
     selection (sync, GD-04) es una lista de pares (fileId, nombre
     local): se procesan exactamente esas descargas, en ese orden, sin
-    elegir la revisión por versión. Una descarga pedida que no está o
-    no es válida se informa en unavailable. Solo cuentan los rechazos
-    de los fileId pedidos. No se combina con limit.
+    elegir la revisión por versión. Una copia pedida que no está o no
+    es válida se informa en unavailable, con su motivo, y nunca se
+    reemplaza por otra copia del mismo fileId. Solo cuentan los
+    problemas de las copias pedidas: los rechazos de otras copias (por
+    ejemplo, una revisión anterior alterada) y los empates de versión,
+    que no aplican a una selección explícita, quedan en discovery como
+    diagnóstico. No se combina con limit.
 
     on_item(DriveSource, batch.ItemResult) recibe el estado de cada
     imagen. Lanza ForeignFolderError o ManifestError antes de procesar.
@@ -537,27 +542,30 @@ def process_downloads(
         selected = discovery.sources[:limit] if limit is not None else list(discovery.sources)
     else:
         pairs = list(selection)
-        wanted = {file_id for file_id, _ in pairs}
         # Por el nombre exacto: en Windows, Path no distingue mayúsculas.
         valid = {(source.file_id, source.path.name): source for source in discovery.valid}
+        # El problema propio de cada copia, por su nombre local exacto.
+        problems = {item.name: item for item in discovery.rejected + discovery.other_folder}
         selected = []
 
         for file_id, name in pairs:
             source = valid.get((file_id, name))
 
-            if source is None:
-                unavailable.append(Excluded(
-                    name,
-                    "la descarga verificada no está disponible o ya no es "
-                    "válida; no se procesa otra revisión en su lugar.",
-                    file_id,
-                ))
-            else:
+            if source is not None:
                 selected.append(source)
+                continue
 
-        scoped_rejected = [
-            item for item in discovery.rejected if item.file_id in wanted
-        ]
+            problem = problems.get(name)
+            detail = f" ({problem.reason.rstrip('.')})" if problem is not None else ""
+            unavailable.append(Excluded(
+                name,
+                f"la descarga verificada no está disponible o ya no es "
+                f"válida{detail}; no se procesa otra revisión en su lugar.",
+                file_id,
+            ))
+
+        # Toda copia pedida con un problema ya está en unavailable.
+        scoped_rejected = []
 
     check_output_folder(output_dir, folder_id)
 

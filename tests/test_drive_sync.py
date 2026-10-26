@@ -1181,3 +1181,97 @@ def test_cli_access_denied_during_download_exits_with_4(cli_env, capsys, deny):
     assert "Sincronización parcial" not in out
     assert "1B" not in cli_env.media_ids()
     assert cli_env.server.created == []
+
+
+# D1: rechazos de otras copias locales del mismo original ------------------
+
+def manifest_entries_for(env, file_id):
+    document = json.loads((env.outputs / MANIFEST_NAME).read_text("utf-8"))
+    return [entry for entry in document["entries"] if entry["source"]["id"] == file_id]
+
+
+def test_rejected_old_copy_does_not_block_the_current_revision(env, ai):
+    env.add("1A", "a.jpg", RED)
+    env.run()                                       # revisión 1
+    env.change("1A", BLUE)
+    assert env.run().complete                       # revisión 2, vigente
+    old = env.downloads / downloads.local_name("a.jpg", "1A")
+    old.write_bytes(b"copia anterior alterada")     # la revisión 1, fuera del plan
+    manifest, created = env.manifest_bytes(), list(env.server.created)
+    ai["prepare"] = ai["cutout"] = 0
+
+    summary = env.run()
+
+    assert summary.complete and summary.stopped is None
+    [item] = summary.plan
+    assert item.status == sync.COMPLETE
+    assert ".rev-" in item.revision.local_name
+    # Solo se procesa la copia seleccionada, con su propia identidad.
+    assert [source.path.name for source in summary.processing.selected] == [item.revision.local_name]
+    assert item.result.identity.source_sha256 == item.revision.sha256
+    assert (item.processing, item.upload.status) == (batch.VERIFIED, uploads.VERIFIED)
+    # El rechazo ajeno queda como advertencia y diagnóstico, sin cambios.
+    assert any("copia" in warning and "del plan" in warning for warning in summary.warnings)
+    assert [(excluded.name, excluded.file_id) for excluded in summary.processing.discovery.rejected] == [
+        (old.name, "1A"),
+    ]
+    assert old.read_bytes() == b"copia anterior alterada"
+    assert env.manifest_bytes() == manifest and env.server.created == created
+    assert ai == {"prepare": 0, "cutout": 0}
+
+
+def test_tied_identical_copies_use_the_deterministic_choice(env, ai):
+    env.add("1A", "b.jpg", RED)
+    first_run = env.run()
+    first = downloads.local_name("b.jpg", "1A")
+    second = downloads.local_name("a.jpg", "1A")
+    # Otra copia válida e idéntica, con la misma versión: un empate.
+    (env.downloads / second).write_bytes((env.downloads / first).read_bytes())
+    record = json.loads((env.downloads / ".drive" / f"{first}.json").read_text("utf-8"))
+    record.update(name="a.jpg", local_name=second)
+    (env.downloads / ".drive" / f"{second}.json").write_text(json.dumps(record), "utf-8")
+
+    for _ in range(2):
+        summary = env.run()
+
+        assert summary.complete
+        [item] = summary.plan
+        assert item.status == sync.COMPLETE
+        assert item.revision.local_name == first
+        assert [source.path.name for source in summary.processing.selected] == [first]
+        assert item.result == first_run.plan[0].result
+        assert item.upload.status == uploads.VERIFIED
+        assert any("copia" in warning for warning in summary.warnings)
+
+    assert len(env.server.created) == 1
+    assert [entry["source"]["drive"]["local_name"] for entry in manifest_entries_for(env, "1A")] == [first]
+    assert ai["prepare"] == 1
+
+
+def test_selected_copy_altered_between_stages_is_not_processed(env, monkeypatch, ai):
+    env.add("1A", "a.jpg", RED)
+    env.run()                                       # revisión 1, válida
+    env.change("1A", BLUE)
+    real = sync.local_processing.process_downloads
+
+    def alter_then_process(*args, **kwargs):
+        [(file_id, name)] = kwargs["selection"]
+        (env.downloads / name).write_bytes(b"alterada entre etapas")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sync.local_processing, "process_downloads", alter_then_process)
+    entries, created = manifest_entries_for(env, "1A"), list(env.server.created)
+    ai["prepare"] = ai["cutout"] = 0
+
+    summary = env.run()
+
+    [item] = summary.plan
+    assert (item.status, item.stage) == (sync.FAILED, sync.PROCESSING)
+    assert "no coincide" in item.reason
+    assert item.result is None and item.upload is None
+    # Ni éxito ni sustitución por la revisión 1, que sigue siendo válida.
+    assert summary.processing.selected == []
+    assert manifest_entries_for(env, "1A") == entries
+    assert ai == {"prepare": 0, "cutout": 0}
+    assert env.server.created == created
+    assert not summary.complete
