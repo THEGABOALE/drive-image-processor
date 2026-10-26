@@ -68,7 +68,12 @@ from ..manifest import Manifest, ManifestError, ResultIdentity
 from ..processing import OutputOptions
 from . import client, downloads, local_processing, queries, uploads
 from .auth import AUTH_WRITE_COMMAND
-from .errors import DriveAuthError, DriveError, DriveSecureConnectionError
+from .errors import (
+    DriveAccessError,
+    DriveAuthError,
+    DriveError,
+    DriveSecureConnectionError,
+)
 
 
 DEFAULT_MODEL = local_processing.DEFAULT_MODEL
@@ -221,7 +226,9 @@ def _download_stage(ctx, summary):
             file_ids=[item.file_id for item in plan],
             dry_run=ctx.dry_run,
             stop_on_disk_full=True,
-            stop_on_errors=(DriveSecureConnectionError,),
+            # Además de autorización, cuota y red: un acceso denegado o una
+            # conexión segura fallida detienen la sincronización.
+            stop_on_errors=(DriveAccessError, DriveSecureConnectionError),
             max_file_bytes=ctx.max_file_bytes,
             sleep=ctx.sleep,
             execute=ctx.execute,

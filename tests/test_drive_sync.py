@@ -26,6 +26,7 @@ from image_processor import batch, drive_cli, pipeline
 from image_processor.background_removal import ModelInitializationError
 from image_processor.google_drive import auth, client, downloads, sync, uploads
 from image_processor.google_drive.errors import (
+    DriveAccessError,
     DriveAuthError,
     DriveCertificateError,
     DriveQuotaError,
@@ -1125,3 +1126,58 @@ def test_persist_flags_follow_the_mode(cli_env, monkeypatch):
         (auth.READ, False), (auth.WRITE, False),
         (auth.READ, True), (auth.WRITE, True),
     ]
+
+
+# Acceso denegado durante la descarga: detiene la sincronización ---------
+
+def deny_metadata(env, file_id):
+    # files.get del original responde 403; el listado no cambia.
+    env.server.items[file_id] = http_error(403, ["insufficientFilePermissions"])
+
+
+def deny_content(env, file_id):
+    env.server.media_failures = [response(http_error(403, ["insufficientFilePermissions"]))]
+
+
+def metadata_requests(env, file_id):
+    return [
+        kwargs for operation, kwargs in env.server.read.calls
+        if operation == "files.get" and kwargs.get("fileId") == file_id
+    ]
+
+
+@pytest.mark.parametrize("deny", [deny_metadata, deny_content], ids=["metadatos", "contenido"])
+def test_access_denied_during_download_stops_the_sync(env, ai, deny):
+    two_originals(env)
+    deny(env, "1A")
+
+    summary = env.run()
+
+    assert isinstance(summary.stopped, DriveAccessError)
+    assert not isinstance(summary.stopped, DriveWriteAccessError)
+    assert "403" in str(summary.stopped)
+    assert summary.stopped_stage == sync.DOWNLOAD
+    # La segunda imagen no se consulta ni se descarga.
+    assert metadata_requests(env, "1B") == []
+    assert "1B" not in env.media_ids()
+    assert by_id(summary)["1B"].status == sync.NOT_STARTED
+    # Ni procesamiento ni subida.
+    assert ai == {"prepare": 0, "cutout": 0}
+    assert not {"files.generateIds", "files.create"} & set(env.write_operations())
+    assert env.server.generated == [] and env.server.created == []
+    assert not summary.complete
+
+
+@pytest.mark.parametrize("deny", [deny_metadata, deny_content], ids=["metadatos", "contenido"])
+def test_cli_access_denied_during_download_exits_with_4(cli_env, capsys, deny):
+    two_originals(cli_env)
+    deny(cli_env, "1A")
+
+    assert sync_cli(cli_env) == 4
+
+    out, err = capsys.readouterr()
+    assert "La sincronización se detuvo en descarga" in err
+    assert "403" in err
+    assert "Sincronización parcial" not in out
+    assert "1B" not in cli_env.media_ids()
+    assert cli_env.server.created == []
