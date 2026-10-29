@@ -438,8 +438,8 @@ para lo mínimo:
   los PNG y consultar los PNG propios.
 
 **Límite de `drive.file`.** Solo da acceso a los archivos que crea la
-aplicación y a los que el usuario le comparte, por ejemplo con Google
-Picker (todavía no integrado). Para crear un archivo dentro de una
+aplicación y a los que el usuario le comparte, por ejemplo eligiéndolos
+con Google Picker (ver más abajo). Para crear un archivo dentro de una
 carpeta, la carpeta debe ser accesible para la aplicación. Una carpeta
 existente que la aplicación no creó, como la de prueba, normalmente
 **no** lo es. `upload` lo comprueba antes de subir nada; si no hay
@@ -447,7 +447,7 @@ acceso, se detiene con el código 4 y lo explica. Que una carpeta sea
 accesible (o elegida con Picker) no da acceso a los archivos que ya
 contiene.
 
-**Carpeta de destino propia.** Mientras Picker no esté integrado,
+**Carpeta de destino propia.** Como alternativa a Google Picker,
 `create-upload-folder --name NOMBRE` crea una carpeta en la raíz de Mi
 unidad con la autorización de escritura. Como la crea la aplicación,
 `drive.file` le da acceso de escritura:
@@ -624,10 +624,58 @@ autorización ausente, expirada o revocada; 4 sin permiso o destino sin
 acceso para `drive.file`; 5 red, cuota agotada o conexión segura
 fallida; 6 imágenes fallidas o pendientes de confirmar; 7 no se pudo
 inicializar el modelo; 8 manifiesto dañado o de otra carpeta; 9 disco
-local lleno.
+local lleno; 10 selección de carpetas cancelada en Google Picker.
 
 **No se admiten ejecuciones concurrentes** sobre las mismas carpetas
 locales: GD-04 todavía no tiene un mecanismo de bloqueo.
+
+### Selección de carpetas con Google Picker
+
+```
+python -m image_processor.drive_cli pick-folders
+python -m image_processor.drive_cli pick-folders --same-folder
+python -m image_processor.drive_cli sync --pick-source --pick-target --downloads downloads/prueba --output outputs/prueba --limit 3
+python -m image_processor.drive_cli sync --pick-source --same-folder --downloads downloads/prueba --output outputs/prueba --limit 3
+python -m image_processor.drive_cli sync --folder-id ID --same-folder --downloads downloads/prueba --output outputs/prueba --limit 3
+```
+
+Se usa la variante oficial de Google Picker para aplicaciones de
+escritorio: la autorización OAuth de escritorio de `auth-write` con los
+parámetros de Picker (`trigger_onepick=true`, `prompt=consent`,
+`allow_folder_selection=true` y solo el tipo carpeta). Google muestra el
+selector en el navegador del sistema y devuelve el ID elegido a la URI
+local de retorno. No hay página propia ni clave de API.
+
+- `pick-folders` abre Google Picker dos veces (origen y destino), o una
+  sola con `--same-folder`, verifica las carpetas y muestra sus IDs y el
+  comando `sync` correspondiente.
+- En `sync`, `--pick-source` reemplaza a `--folder-id`, y `--pick-target`
+  o `--same-folder` a `--target-folder-id`. Con `--same-folder` la
+  carpeta se elige una sola vez y es origen y destino.
+
+**Permisos.** El Picker de escritorio solo admite `drive.file`, el
+permiso de `auth-write`: no se amplía nada. Elegir una carpeta le da a la
+aplicación acceso `drive.file` a ella, así que puede crear los PNG
+dentro. La lectura sigue usando `drive.readonly` y `token.json` no se
+modifica. La autorización que entrega el Picker se valida (exactamente
+`drive.file`) y reemplaza a `token_write.json`, como `auth-write`; en la
+vista previa (`--dry-run`) no se guarda. En Google Cloud no hace falta
+agregar scopes; si la consola lo pide, habilite **Google Picker API**
+en el mismo proyecto.
+
+**Verificación.** Antes de empezar se comprueba con la API de Drive que
+el origen sea una carpeta existente y legible y que en el destino
+`drive.file` pueda crear archivos (código 4 si no). Un elemento que no
+es una carpeta o una selección de varios elementos se rechaza. Si se
+cancela el selector o no se completa a tiempo, el comando termina con
+el código 10 y no se inicia ninguna operación.
+
+**Misma carpeta.** Si origen y destino coinciden, los PNG generados
+nunca se procesan como originales: el listado excluye los
+`TRANSFORMADA_` y, además, todo archivo que la aplicación subió según su
+registro de subidas, por su ID (aunque se haya renombrado en Drive) o
+por su contenido (si se copió). La identidad de cada subida evita los
+duplicados, como en `upload`.
 
 ### Permisos y riesgos
 
@@ -642,8 +690,9 @@ locales: GD-04 todavía no tiene un mecanismo de bloqueo.
 - `drive.file` (escritura, GD-03B) es un scope no sensible: la
   aplicación solo accede a los archivos que crea o que el usuario le
   comparte. Escribir en una carpeta existente requiere que la carpeta
-  sea accesible para la aplicación (Google Picker, pendiente). Elegir
-  una carpeta no garantiza acceso a los archivos que ya contiene.
+  sea accesible para la aplicación: elegida con Google Picker o creada
+  por ella. Elegir una carpeta no garantiza acceso a los archivos que
+  ya contiene.
 - No se usan cuentas de servicio: la autorización es siempre personal.
 
 ## Estado

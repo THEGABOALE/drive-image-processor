@@ -565,6 +565,34 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def uploaded_results(input_dir: Path) -> tuple[set[str], set[str]]:
+    """
+    IDs remotos y MD5 de los PNG que la aplicación subió (o reservó)
+    desde input_dir, según sus registros de subida, en cualquier carpeta
+    de destino. Solo lee; los registros dañados se ignoran aquí (la
+    subida los informa).
+    """
+    ids: set[str] = set()
+    md5s: set[str] = set()
+    root = Path(input_dir) / LEDGER_DIR
+
+    if not root.is_dir():
+        return ids, md5s
+
+    for path in sorted(root.glob("*/*.json")):
+        try:
+            record = _read_ledger(path)
+        except _Failed:
+            continue
+
+        if record is not None:
+            ids.add(record["remote_id"])
+            if isinstance(record.get("md5_checksum"), str):
+                md5s.add(record["md5_checksum"])
+
+    return ids, md5s
+
+
 def _read_ledger(path: Path) -> dict | None:
     if not path.exists():
         return None
@@ -740,7 +768,7 @@ def _check_write_access(ctx: _Context) -> None:
             f"carpeta de destino {target.name} ({target.id}). Con drive.file "
             "la aplicación solo puede crear archivos en carpetas que ella "
             "creó o que el usuario le autorizó (por ejemplo, con Google "
-            "Picker, todavía no integrado). No se subió nada y no se "
+            "Picker: pick-folders o sync --pick-target). No se subió nada y no se "
             "solicita el permiso 'drive'. Puede crear una carpeta propia de "
             "la aplicación con: python -m image_processor.drive_cli "
             'create-upload-folder --name "NOMBRE"'

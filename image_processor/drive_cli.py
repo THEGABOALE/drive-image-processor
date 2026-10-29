@@ -10,6 +10,8 @@ Consulta y descarga de solo lectura de Google Drive.
     python -m image_processor.drive_cli create-upload-folder --name NOMBRE
     python -m image_processor.drive_cli upload --folder-id ID --input DIR --limit N [--dry-run]
     python -m image_processor.drive_cli sync --folder-id ID --downloads DIR --output DIR --target-folder-id ID (--limit N | --all) [--dry-run]
+    python -m image_processor.drive_cli pick-folders [--same-folder]
+    python -m image_processor.drive_cli sync --pick-source (--pick-target | --same-folder) --downloads DIR --output DIR (--limit N | --all)
     python -m image_processor.drive_cli logout [--write]
 
 process-local trabaja solo con archivos locales: no se conecta a
@@ -21,6 +23,10 @@ auth-write y upload usan una autorización de escritura separada
 sync (GD-04) coordina download, process-local y upload con un único
 plan por ejecución. No se admiten ejecuciones concurrentes sobre las
 mismas carpetas locales.
+
+pick-folders y las opciones --pick-source, --pick-target y --same-folder
+de sync eligen carpetas existentes con Google Picker (variante para
+aplicaciones de escritorio, solo drive.file).
 
 Códigos de salida:
 
@@ -43,6 +49,8 @@ Códigos de salida:
    upload: el manifiesto de los resultados está dañado; no se subió nada.
    sync: el manifiesto está dañado o es de otra carpeta de Drive.
 9  sync: no queda espacio en el disco local; se detuvo la descarga.
+10 pick-folders y sync: se canceló la selección en Google Picker o no
+   se completó a tiempo; no se inició ninguna operación.
 
 En upload y sync, 3 incluye la autorización de escritura ausente o
 revocada y 4 una carpeta de destino sin acceso para drive.file. En sync,
@@ -57,7 +65,7 @@ from pathlib import Path
 
 from . import batch
 from .background_removal import SUPPORTED_MODELS, ModelInitializationError
-from .google_drive import auth, client, downloads, local_processing, queries, sync, uploads
+from .google_drive import auth, client, downloads, local_processing, picker, queries, sync, uploads
 from .google_drive.errors import (
     DriveAccessError,
     DriveAuthError,
@@ -684,6 +692,81 @@ def _show_sync_event(stage, *details):
     print(line, file=sys.stderr if failed else sys.stdout)
 
 
+def _pick(args, purpose: str, persist: bool):
+    return picker.pick_folder(
+        auth.secret_paths(args.secrets_dir), purpose, persist=persist
+    )
+
+
+def _sync_folders(args, persist: bool):
+    """IDs de origen y destino de sync: indicados o elegidos con Google Picker."""
+
+    picked = None
+
+    if args.pick_source:
+        purpose = (
+            "la carpeta de origen y destino" if args.same_folder
+            else "la carpeta de origen (originales)"
+        )
+        picked = _pick(args, purpose, persist)
+        folder_id = picked.id
+    else:
+        folder_id = args.folder_id
+
+    if args.same_folder:
+        target_id = folder_id
+    elif args.pick_target:
+        picked = _pick(args, "la carpeta de destino (resultados)", persist)
+        target_id = picked.id
+    else:
+        target_id = args.target_folder_id
+
+    return folder_id, target_id, picked
+
+
+def _show_selection(selection) -> None:
+    source, target = selection.source, selection.target
+    print("\nCarpetas elegidas con Google Picker")
+    print(f"Origen:  {source.name} ({source.id}): carpeta existente y legible.")
+
+    access = {
+        True: "drive.file puede crear archivos en ella.",
+        False: "drive.file no tiene acceso (la subida real se detendría).",
+        None: "el permiso de escritura no se verificó.",
+    }
+    print(f"Destino: {target.folder.name} ({target.folder.id}): {access[target.write_access]}")
+
+    if selection.same_folder:
+        print(
+            "Origen y destino son la misma carpeta: los PNG generados no se "
+            "procesan como originales."
+        )
+
+
+def _command_pick_folders(args) -> int:
+    paths = auth.secret_paths(args.secrets_dir)
+
+    if args.same_folder:
+        source = target = picker.pick_folder(paths, "la carpeta de origen y destino")
+    else:
+        source = picker.pick_folder(paths, "la carpeta de origen (originales)")
+        target = picker.pick_folder(paths, "la carpeta de destino (resultados)")
+
+    _, read_service = _connect(args.secrets_dir)
+    selection = picker.verify_selection(
+        read_service, client.build_service(target.credentials), source.id, target.id
+    )
+    _show_selection(selection)
+
+    print(
+        "\nÚselas con:\n"
+        "  python -m image_processor.drive_cli sync "
+        f"--folder-id {source.id} --target-folder-id {target.id} "
+        "--downloads CARPETA_DE_DESCARGAS --output CARPETA_DE_RESULTADOS --limit 1"
+    )
+    return 0
+
+
 def _command_sync(args) -> int:
     options = _output_options(args)
     limit = None if args.all else args.limit
@@ -694,8 +777,10 @@ def _command_sync(args) -> int:
     if not 0 < args.max_file_mb <= 1024:
         raise ValueError("--max-file-mb debe estar entre 0 y 1024.")
 
-    queries.validate_file_id(args.folder_id)
-    queries.validate_file_id(args.target_folder_id)
+    if args.folder_id is not None:
+        queries.validate_file_id(args.folder_id)
+    if args.target_folder_id is not None:
+        queries.validate_file_id(args.target_folder_id)
 
     secrets = auth.secret_paths(args.secrets_dir).directory
 
@@ -707,22 +792,37 @@ def _command_sync(args) -> int:
 
     # La vista previa no guarda tokens renovados; una ejecución real sí.
     persist = not args.dry_run
+
+    # Carpetas indicadas o elegidas con Google Picker, antes de cualquier
+    # consulta: una cancelación no deja empezar nada.
+    folder_id, target_id, picked = _sync_folders(args, persist)
+
     _, read_service = _connect(args.secrets_dir, persist=persist)
 
-    try:
-        _, write_service = _connect(args.secrets_dir, profile=auth.WRITE, persist=persist)
-    except DriveAuthError as exc:
-        if not args.dry_run:
-            raise
-        write_service = None
-        print(
-            f"[AVISO] {exc} La vista previa continúa sin comprobar el "
-            "acceso de escritura."
+    if picked is not None:
+        # La autorización drive.file que entregó el Picker.
+        write_service = client.build_service(picked.credentials)
+    else:
+        try:
+            _, write_service = _connect(args.secrets_dir, profile=auth.WRITE, persist=persist)
+        except DriveAuthError as exc:
+            if not args.dry_run:
+                raise
+            write_service = None
+            print(
+                f"[AVISO] {exc} La vista previa continúa sin comprobar el "
+                "acceso de escritura."
+            )
+
+    if args.pick_source or args.pick_target:
+        selection = picker.verify_selection(
+            read_service, write_service, folder_id, target_id, dry_run=args.dry_run
         )
+        _show_selection(selection)
 
     print("\nSincronización con Google Drive")
-    print(f"Carpeta de los originales: {args.folder_id}")
-    print(f"Destino: {args.target_folder_id}")
+    print(f"Carpeta de los originales: {folder_id}")
+    print(f"Destino: {target_id}{' (la misma carpeta)' if folder_id == target_id else ''}")
     print(f"Descargas: {args.downloads}")
     print(f"Resultados: {args.output}")
     print(
@@ -743,10 +843,10 @@ def _command_sync(args) -> int:
         summary = sync.sync(
             read_service,
             write_service,
-            folder_id=args.folder_id,
+            folder_id=folder_id,
             downloads_dir=args.downloads,
             output_dir=args.output,
-            target_folder_id=args.target_folder_id,
+            target_folder_id=target_id,
             limit=limit,
             model_name=args.model,
             options=options,
@@ -1030,9 +1130,14 @@ def main(argv: list[str] | None = None) -> int:
             "falta (sin crear carpetas)"
         ),
     )
-    synchronize.add_argument(
-        "--folder-id", required=True,
+    source = synchronize.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--folder-id", default=None,
         help="ID de la carpeta de Drive de los originales",
+    )
+    source.add_argument(
+        "--pick-source", action="store_true",
+        help="Elige la carpeta de los originales con Google Picker",
     )
     synchronize.add_argument(
         "--downloads", type=Path, required=True,
@@ -1042,9 +1147,18 @@ def main(argv: list[str] | None = None) -> int:
         "--output", type=Path, required=True,
         help="Carpeta local de resultados (GD-03A)",
     )
-    synchronize.add_argument(
-        "--target-folder-id", required=True,
+    target = synchronize.add_mutually_exclusive_group(required=True)
+    target.add_argument(
+        "--target-folder-id", default=None,
         help="Carpeta de Drive de destino; debe existir y ser accesible para drive.file",
+    )
+    target.add_argument(
+        "--pick-target", action="store_true",
+        help="Elige la carpeta de destino con Google Picker",
+    )
+    target.add_argument(
+        "--same-folder", action="store_true",
+        help="Usa la carpeta de los originales también como destino",
     )
     selection = synchronize.add_mutually_exclusive_group(required=True)
     selection.add_argument(
@@ -1067,10 +1181,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     synchronize.set_defaults(handler=_command_sync)
 
+    pick = commands.add_parser(
+        "pick-folders",
+        help=(
+            "Elige con Google Picker la carpeta de origen y la de destino "
+            "(o una sola para ambas) y las verifica"
+        ),
+    )
+    pick.add_argument(
+        "--same-folder", action="store_true",
+        help="Usa una sola carpeta como origen y destino (se elige una vez)",
+    )
+    pick.set_defaults(handler=_command_pick_folders)
+
     args = parser.parse_args(argv)
 
     try:
         return args.handler(args)
+
+    except picker.PickerCancelled as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        print("No se inició ninguna operación.", file=sys.stderr)
+        return 10
 
     except ValueError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)

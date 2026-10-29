@@ -37,6 +37,14 @@ nombre, la fecha, la versión y headRevisionId son metadatos:
   se descarga ni avanza: queda fallida y se informa;
 - un cambio durante la descarga lo detecta la descarga (GD-02).
 
+PNG generados
+-------------
+
+Los resultados nunca se procesan como originales, aunque el destino sea
+la misma carpeta: el listado excluye los TRANSFORMADA_ y, además, los
+archivos que la aplicación subió según su registro de subidas (por su
+ID remoto, aunque se hayan renombrado, o por su MD5, si se copiaron).
+
 Errores
 -------
 
@@ -513,6 +521,26 @@ class _Context:
         return lambda *details: self.on_event(stage, *details)
 
 
+GENERATED_REASON = "PNG generado por esta aplicación"
+
+
+def _exclude_generated(listing: queries.ImageListing, output_dir: Path) -> queries.ImageListing:
+    """
+    El listado sin los PNG que subió la aplicación (registro de subidas):
+    por su ID remoto o por su contenido (MD5). Solo lee.
+    """
+    ids, md5s = uploads.uploaded_results(output_dir)
+    images, skipped = [], list(listing.skipped)
+
+    for image in listing.images:
+        if image.id in ids or (image.md5_checksum is not None and image.md5_checksum in md5s):
+            skipped.append(queries.SkippedFile(image.id, image.name, GENERATED_REASON))
+        else:
+            images.append(image)
+
+    return queries.ImageListing(folder=listing.folder, images=images, skipped=skipped)
+
+
 def _check_local_dir(path: Path, label: str) -> None:
     if path.exists() and not path.is_dir():
         raise NotADirectoryError(f"{label} no es una carpeta: {path}")
@@ -578,6 +606,9 @@ def sync(
         read_service, write_service, target_folder_id,
         dry_run=dry_run, execute=execute,
     )
+
+    # Los PNG que subió la aplicación nunca son originales.
+    listing = _exclude_generated(listing, output_dir)
 
     # 3. Una sola selección, con el límite aplicado una vez.
     summary = SyncSummary(folder=listing.folder, target=target, dry_run=dry_run)
