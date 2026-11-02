@@ -695,6 +695,12 @@ duplicados, como en `upload`.
   ya contiene.
 - No se usan cuentas de servicio: la autorización es siempre personal.
 
+## Aplicación web
+
+Interfaz local para Windows (React + FastAPI), en desarrollo. Usa este
+motor como biblioteca y tiene sus propios tokens, separados de los de la
+CLI. Ver [web/README.md](web/README.md).
+
 ## Estado
 
 Prototipo en desarrollo.
@@ -708,5 +714,3 @@ Prototipo en desarrollo.
 ## Próximas integraciones
 
 - Google Drive API: descarga, procesamiento y subida de resultados
-- FastAPI
-- Next.js

@@ -23,6 +23,10 @@ credentials*.json
 token*.json
 *.token.json
 
+# Frontend web
+node_modules/
+web/frontend/dist/
+
 # Temporales (incluidas copias de tokens a medio escribir)
 *.tmp
 
