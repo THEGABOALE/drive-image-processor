@@ -38,6 +38,9 @@ LOCAL_ORIGIN = f"http://localhost:{PORT}"
 
 ENVIRONMENTS = ("development", "production")
 
+# Lo define el lanzador del ejecutable.
+PACKAGED_VARIABLE = "DIP_PACKAGED"
+
 _ENV_FILES = {
     "development": ".env.dev.local",
     "production": ".env.production.local",
@@ -193,6 +196,11 @@ def load_settings(environ=None, env_file: Path | None = None) -> Settings:
         port=PORT,
         allowed_hosts=frozenset(hosts),
         allowed_origins=frozenset(origins),
-        app_url=DEV_FRONTEND_ORIGIN if development else LOCAL_ORIGIN,
+        # El paquete no tiene Vite: siempre abre la página del propio servidor.
+        app_url=(
+            DEV_FRONTEND_ORIGIN
+            if development and values.get(PACKAGED_VARIABLE) != "1"
+            else LOCAL_ORIGIN
+        ),
         frontend_dist=BACKEND_DIR.parent / "frontend" / "dist",
     )

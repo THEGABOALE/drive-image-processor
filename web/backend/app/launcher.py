@@ -23,7 +23,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from .config import ENVIRONMENTS, LOCAL_ORIGIN, ConfigError
+from .config import ENVIRONMENTS, LOCAL_ORIGIN, PACKAGED_VARIABLE, ConfigError
 
 
 # Debe coincidir con el modelo por defecto del motor.
@@ -62,6 +62,7 @@ def prepare_environment(base: Path, environ) -> None:
         environ[CLIENT_FILE_VARIABLE] = str(config_dir / client_file)
 
     environ["REMBG_HOME"] = str(Path(base) / "rembg")
+    environ[PACKAGED_VARIABLE] = "1"
 
 
 def already_running(url: str, *, urlopen=_LOCAL_OPENER.open) -> bool:

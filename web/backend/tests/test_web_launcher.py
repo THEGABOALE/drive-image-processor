@@ -133,6 +133,33 @@ def test_bundle_without_environment_is_rejected(tmp_path):
         launcher.prepare_environment(base, {"LOCALAPPDATA": str(tmp_path)})
 
 
+def test_a_development_bundle_opens_its_own_page_not_vite(tmp_path):
+    # El paquete no tiene Vite: aun con la configuración de desarrollo, la
+    # página es la que sirve el propio servidor.
+    from web.backend.app.config import load_settings
+
+    base = tmp_path / "paquete"
+    base.mkdir()
+    dev = bundle(base, env_lines=[
+        "DIP_ENV=development",
+        "GOOGLE_CLOUD_PROJECT_ID=drive-image-processor-dev",
+        "GOOGLE_CLOUD_PROJECT_NUMBER=123456789012",
+        "GOOGLE_DESKTOP_CLIENT_FILE=desktop_client.json",
+        "GOOGLE_PICKER_CLIENT_ID=123456789012-web.apps.googleusercontent.com",
+        "GOOGLE_PICKER_API_KEY=clave",
+    ])
+    (dev / "config" / "desktop_client.json").write_text(
+        json.dumps(desktop_config(project_id="drive-image-processor-dev")), encoding="utf-8"
+    )
+    environ = {"LOCALAPPDATA": str(tmp_path / "local")}
+    launcher.prepare_environment(dev, environ)
+
+    settings = load_settings(environ, env_file=tmp_path / "no-existe.env")
+
+    assert settings.environment == "development"
+    assert settings.app_url == "http://localhost:8000"
+
+
 def test_bundled_settings_pass_the_app_validation(tmp_path):
     from web.backend.app.config import load_settings
 
