@@ -149,7 +149,8 @@ No se pega ninguna credencial en el chat ni en el repositorio.
    `.secrets/credentials.json` existente.
 
 En Testing, Google invalida los tokens de actualización a los 7 días: la
-aplicación pedirá volver a conectar.
+aplicación pedirá volver a conectar. Los tokens de la CLI caducan igual, cada uno
+según cuándo se autorizó: se renuevan con `auth` y `auth-write`.
 
 ### Producción: `drive-image-processor-prod`
 
@@ -214,10 +215,15 @@ real. No crea ni modifica nada en Drive.
 
 1. Conectar la cuenta: dos autorizaciones. Debe mostrarse el correo.
 2. Elegir el origen y el destino con Picker. Debe abrirse sin error de clave.
+   Usar carpetas nunca elegidas con la CLI: el permiso `drive.file` es por cuenta
+   y proyecto, así que una carpeta ya autorizada no demuestra nada.
 3. Pulsar **Verificar carpetas**: debe confirmar el acceso.
 4. Repetir con **misma carpeta**.
-5. En el selector de cuentas de la ventana de Google, elegir otra cuenta: debe
-   mostrar que es otra cuenta y no abrir Picker.
+5. Con una segunda cuenta agregada como usuario de prueba, abrir la aplicación en
+   una ventana de incógnito, pulsar **Elegir carpeta de origen** y entrar con esa
+   cuenta: debe mostrar que es otra cuenta y no abrir Picker. Sin ese alta, Google
+   la bloquea antes (`403 access_denied`) y la comprobación de la aplicación no
+   llega a ejecutarse.
 6. **Desconectar** y comprobar que la CLI sigue funcionando.
 
 Si en el paso 3 aparece *carpeta no autorizada*, la autorización no llega del
