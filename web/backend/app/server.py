@@ -57,11 +57,14 @@ def open_browser_when_started(
         sleep(0.1)
 
 
-def serve(app, settings, *, open_browser: bool = True) -> None:
+def serve(app, settings, *, open_browser: bool = True, quiet: bool = False) -> None:
     sock = bind_socket(settings)
 
     try:
-        server = uvicorn.Server(uvicorn.Config(app, log_level="info"))
+        # quiet: sin el registro de cada solicitud (versión empaquetada).
+        server = uvicorn.Server(uvicorn.Config(
+            app, log_level="warning" if quiet else "info", access_log=not quiet
+        ))
 
         if open_browser:
             threading.Thread(
@@ -80,6 +83,9 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--no-browser", action="store_true", help="no abrir el navegador"
     )
+    parser.add_argument(
+        "--quiet", action="store_true", help="no mostrar cada solicitud"
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -90,6 +96,7 @@ def main(argv=None) -> int:
             create_app(settings, manager),
             settings,
             open_browser=not args.no_browser,
+            quiet=args.quiet,
         )
     except (ConfigError, TokenStoreError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

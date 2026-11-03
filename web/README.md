@@ -6,7 +6,7 @@ como biblioteca y no cambia. Se abre en el navegador y escucha solo en
 
 Permite conectar una cuenta de Google, elegir las carpetas con Google Picker,
 revisar una vista previa, procesar las imágenes y ver el progreso y el resumen.
-Todavía no se distribuye como ejecutable.
+Se distribuye como una carpeta comprimida con `DriveImageProcessor.exe`.
 
 ## Arquitectura
 
@@ -159,6 +159,50 @@ después de la vista previa también se procesa. Por eso la vista previa vence.
 
 La primera ejecución descarga el modelo de IA a la caché de rembg y puede tardar
 varios minutos.
+
+## Ejecutable para Windows
+
+```bash
+python -m pip install "pyinstaller>=6.10,<7"
+```
+
+```bash
+python web/packaging/build.py --config web/packaging/config
+```
+
+`web/packaging/config` (ignorada por Git) tiene dos archivos:
+
+- `app.env`: `DIP_ENV` y las variables de la tabla de arriba, con
+  `GOOGLE_DESKTOP_CLIENT_FILE=desktop_client.json`;
+- `desktop_client.json`: el JSON del cliente de escritorio de ese entorno.
+
+El script valida la configuración con las reglas de la aplicación, compila el
+frontend, toma el modelo de la caché de rembg (lo descarga si falta), arma el
+programa con PyInstaller (una carpeta, con consola), le agrega `config/`, el
+modelo y `LEEME.txt`, prueba el ejecutable con `--selftest` y deja
+`web/packaging/DriveImageProcessor-<entorno>.zip`.
+
+**El ejecutable:**
+
+- muestra una consola: cerrarla cierra la aplicación;
+- si ya está abierta, solo abre el navegador;
+- ante un error, lo muestra y espera Enter para que no se cierre sin explicación;
+- usa la configuración de su carpeta `config/`, no las variables del equipo, y el
+  modelo de su carpeta `rembg/`;
+- `DriveImageProcessor.exe --selftest` procesa una imagen de prueba, sin Drive.
+
+**Credenciales en el paquete.** Lleva, en texto, el cliente de escritorio y la
+clave de API de Picker. Google no considera confidencial el secreto de un
+cliente de aplicación instalada, y la clave es pública y está restringida. Nunca
+lleva tokens. Con la configuración de desarrollo, solo funciona para los
+usuarios de prueba.
+
+**Primer arranque.** Al importarse, rembg carga pymatting, que usa numba: la
+primera vez compila, lo que tarda unos 50 segundos. El script deja esa caché en
+el paquete al probarlo; en un equipo con otro procesador numba puede volver a
+compilar una vez.
+
+**Tamaño.** Unos 610 MB descomprimido, de los que 180 MB son el modelo.
 
 ## Configuración manual en Google Cloud
 

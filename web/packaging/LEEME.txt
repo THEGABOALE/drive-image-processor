@@ -1,0 +1,41 @@
+Drive Image Processor
+=====================
+
+Quita el fondo de las fotos de productos de una carpeta de Google Drive y
+guarda los resultados (PNG de 400x400, fondo blanco) en otra carpeta, o en la
+misma. Los originales nunca se modifican ni se borran.
+
+Cómo usarlo
+-----------
+
+1. Descomprima toda la carpeta en un lugar de su equipo, por ejemplo en
+   Documentos. No ejecute el programa desde dentro del .zip.
+2. Abra DriveImageProcessor.exe. Se abre una ventana negra y, después, la
+   aplicación en el navegador (http://localhost:8000). La primera vez puede
+   tardar un minuto.
+3. Para salir, cierre la ventana negra.
+
+Si vuelve a abrir el programa mientras ya está abierto, solo se muestra en el
+navegador.
+
+Avisos que puede ver
+--------------------
+
+- Windows puede advertir que el programa no está firmado digitalmente.
+- Google puede advertir que la aplicación no está verificada: es una
+  aplicación privada que todavía no pasó la verificación de Google. Solo pide
+  permiso para leer su Drive y para crear los archivos de resultados.
+- En cuentas de Google Workspace, el administrador puede no permitir
+  aplicaciones externas.
+
+Sus datos
+---------
+
+La aplicación funciona solo en este equipo. La autorización de Google y los
+registros de las fotos procesadas se guardan, protegidos, en:
+
+    %LOCALAPPDATA%\DriveImageProcessor
+
+No borre esa carpeta mientras use la aplicación: sus registros evitan subir
+resultados duplicados. Para quitar el acceso de la aplicación a su cuenta:
+https://myaccount.google.com/permissions

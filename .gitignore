@@ -27,6 +27,12 @@ token*.json
 node_modules/
 web/frontend/dist/
 
+# Ejecutable: configuración con credenciales y resultados de la compilación
+web/packaging/config/
+web/packaging/build/
+web/packaging/dist/
+web/packaging/*.zip
+
 # Temporales (incluidas copias de tokens a medio escribir)
 *.tmp
 
