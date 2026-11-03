@@ -89,7 +89,7 @@ def test_default_env_file_depends_on_the_environment(make_environ, tmp_path, mon
     monkeypatch.setattr(config, "BACKEND_DIR", tmp_path)
     environ = make_environ("production")
     key = environ.pop("GOOGLE_PICKER_API_KEY")
-    (tmp_path / ".env.development.local").write_text(
+    (tmp_path / ".env.dev.local").write_text(
         "GOOGLE_PICKER_API_KEY=clave-de-desarrollo\n", encoding="utf-8"
     )
     (tmp_path / ".env.production.local").write_text(
@@ -97,6 +97,10 @@ def test_default_env_file_depends_on_the_environment(make_environ, tmp_path, mon
     )
 
     assert load_settings(environ).picker_api_key == key
+
+    environ = make_environ("development")
+    environ.pop("GOOGLE_PICKER_API_KEY")
+    assert load_settings(environ).picker_api_key == "clave-de-desarrollo"
 
 
 # Clientes OAuth ------------------------------------------------------------

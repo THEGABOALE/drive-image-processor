@@ -63,7 +63,7 @@ npm --prefix web/frontend test
 
 ## Variables de configuración
 
-Se leen de `web/backend/.env.development.local` o
+Se leen de `web/backend/.env.dev.local` o
 `web/backend/.env.production.local` (ignorados por Git). Las variables reales
 tienen prioridad. Plantilla: `web/backend/.env.example`.
 
@@ -144,7 +144,7 @@ No se pega ninguna credencial en el chat ni en el repositorio.
    - restricción de sitios web: `http://localhost:5173/*`,
      `http://localhost:8000/*` y `https://docs.google.com/*`;
    - restricción de API: solo Google Picker API.
-7. **Archivo:** crear `web/backend/.env.development.local` desde
+7. **Archivo:** crear `web/backend/.env.dev.local` desde
    `web/backend/.env.example`. `GOOGLE_DESKTOP_CLIENT_FILE` puede apuntar al
    `.secrets/credentials.json` existente.
 

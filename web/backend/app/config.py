@@ -2,7 +2,8 @@
 Configuración por entorno de la aplicación web.
 
 El entorno (DIP_ENV: development o production) elige el archivo
-web/backend/.env.<entorno>.local, excluido de Git, y la carpeta de datos
+web/backend/.env.dev.local o .env.production.local, excluidos de Git, y la
+carpeta de datos
 %LOCALAPPDATA%/DriveImageProcessor/<entorno>. Las variables reales tienen
 prioridad sobre el archivo. Ninguna credencial está en el código.
 
@@ -36,6 +37,11 @@ DEV_FRONTEND_ORIGIN = "http://localhost:5173"
 LOCAL_ORIGIN = f"http://localhost:{PORT}"
 
 ENVIRONMENTS = ("development", "production")
+
+_ENV_FILES = {
+    "development": ".env.dev.local",
+    "production": ".env.production.local",
+}
 
 # Sufijo del proyecto del otro entorno, que nunca debe usarse en este.
 _FOREIGN_PROJECT_SUFFIX = {"development": "-prod", "production": "-dev"}
@@ -126,7 +132,7 @@ def load_settings(environ=None, env_file: Path | None = None) -> Settings:
         raise ConfigError("DIP_ENV debe ser development o production.")
 
     path = env_file if env_file is not None else (
-        BACKEND_DIR / f".env.{environment}.local"
+        BACKEND_DIR / _ENV_FILES[environment]
     )
     values = {**dotenv_values(path), **environ}
 

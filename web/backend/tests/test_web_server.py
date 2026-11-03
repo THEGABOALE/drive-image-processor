@@ -277,7 +277,7 @@ def test_env_files_are_ignored_by_git():
     import subprocess
 
     for name in (
-        "web/backend/.env.development.local",
+        "web/backend/.env.dev.local",
         "web/backend/.env.production.local",
         "web/frontend/.env.local",
     ):
