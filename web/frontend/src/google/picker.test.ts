@@ -27,41 +27,42 @@ function fakeGoogle(reply: TokenReply = { kind: "token" }) {
     tokenConfigs: [] as Record<string, unknown>[],
     requests: 0,
     builder: {} as Record<string, unknown>,
-    view: {} as Record<string, unknown>,
+    views: [] as Record<string, unknown>[],
     callback: null as null | ((data: Record<string, unknown>) => void),
     visible: 0,
     revoked: 0,
   };
 
   class DocsView {
+    options: Record<string, unknown>;
     constructor(viewId: string) {
-      state.view.viewId = viewId;
+      this.options = { viewId };
     }
     setSelectFolderEnabled(value: boolean) {
-      state.view.selectFolder = value;
+      this.options.selectFolder = value;
       return this;
     }
     setIncludeFolders(value: boolean) {
-      state.view.includeFolders = value;
+      this.options.includeFolders = value;
       return this;
     }
     setMimeTypes(value: string) {
-      state.view.mimeTypes = value;
+      this.options.mimeTypes = value;
       return this;
     }
     setMode(value: string) {
-      state.view.mode = value;
+      this.options.mode = value;
       return this;
     }
     setEnableDrives(value: boolean) {
-      state.view.drives = value;
+      this.options.drives = value;
       return this;
     }
   }
 
   class PickerBuilder {
-    addView(view: unknown) {
-      state.builder.view = view;
+    addView(view: DocsView) {
+      state.views.push(view.options);
       return this;
     }
     setOAuthToken(value: string) {
@@ -330,14 +331,27 @@ describe("Google Picker", () => {
     const state = fakeGoogle();
     await pickWith(state, { action: "cancel" });
 
-    expect(state.view).toMatchObject({
-      viewId: "folders",
-      selectFolder: true,
-      includeFolders: true,
-      mimeTypes: FOLDER_MIME,
-      mode: "list",
-    });
+    expect(state.views.length).toBeGreaterThan(0);
+    for (const view of state.views) {
+      expect(view).toMatchObject({
+        viewId: "folders",
+        selectFolder: true,
+        includeFolders: true,
+        mimeTypes: FOLDER_MIME,
+        mode: "list",
+      });
+    }
     expect(state.builder.feature).toBeUndefined();
+  });
+
+  it("abre en las carpetas normales y deja las unidades compartidas en otra pestaña", async () => {
+    const state = fakeGoogle();
+    await pickWith(state, { action: "cancel" });
+
+    // Con setEnableDrives, la vista muestra solo las unidades compartidas.
+    expect(state.views).toHaveLength(2);
+    expect(state.views[0].drives).toBeUndefined();
+    expect(state.views[1].drives).toBe(true);
   });
 
   it("devuelve la carpeta elegida", async () => {

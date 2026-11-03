@@ -211,15 +211,18 @@ export class GooglePicker {
     const { picker } = window.google;
 
     return new Promise((resolve, reject) => {
-      const view = new picker.DocsView(picker.ViewId.FOLDERS)
-        .setSelectFolderEnabled(true)
-        .setIncludeFolders(true)
-        .setMimeTypes(FOLDER_MIME)
-        .setMode(picker.DocsViewMode.LIST)
-        .setEnableDrives(true);
+      const folderView = () =>
+        new picker.DocsView(picker.ViewId.FOLDERS)
+          .setSelectFolderEnabled(true)
+          .setIncludeFolders(true)
+          .setMimeTypes(FOLDER_MIME)
+          .setMode(picker.DocsViewMode.LIST);
 
+      // Dos pestañas: con setEnableDrives la vista muestra solo las unidades
+      // compartidas, así que no puede ser la única ni la primera.
       new picker.PickerBuilder()
-        .addView(view)
+        .addView(folderView())
+        .addView(folderView().setEnableDrives(true))
         .setOAuthToken(token)
         .setDeveloperKey(this.config.api_key)
         .setAppId(this.config.project_number)
