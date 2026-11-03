@@ -723,6 +723,141 @@ def test_returned_job_cannot_alter_the_state(jobs, drive):
     assert current(jobs)["summary"]["can_run"] is True
 
 
+# Cierre brusco de la aplicación ---------------------------------------------
+
+class _Killed(BaseException):
+    """Simula que el proceso termina de golpe: nada lo atrapa."""
+
+
+@pytest.fixture
+def killable(settings, connection, monkeypatch):
+    """
+    Un JobManager cuyo hilo muere en el punto elegido, como si se cerrara la
+    aplicación. Devuelve una función que espera hasta ese punto.
+    """
+    reached = threading.Event()
+    threads = []
+
+    def start_thread(target):
+        thread = threading.Thread(target=target)
+        threads.append(thread)
+        thread.start()
+
+    monkeypatch.setattr(threading, "excepthook", lambda args: None)
+    jobs = JobManager(settings, connection, start_thread=start_thread)
+
+    def wait():
+        assert reached.wait(10)
+        for thread in threads:
+            thread.join(10)
+            assert not thread.is_alive()
+
+    yield jobs, reached, wait
+
+
+def restart(settings, connection):
+    return JobManager(settings, connection, start_thread=lambda target: target())
+
+
+def finished_preview(jobs):
+    job = jobs.start_preview(SOURCE, TARGET)
+    for _ in range(1000):
+        if jobs.current("sub-a")["status"] != RUNNING:
+            return jobs.current("sub-a")
+        threading.Event().wait(0.01)
+    raise AssertionError("la vista previa no terminó")
+
+
+def test_closed_while_processing_resumes_without_duplicates(
+    killable, settings, connection, drive, monkeypatch, ai
+):
+    jobs, reached, wait = killable
+    add_photo(drive, "foto1")
+    add_photo(drive, "foto2")
+    processed = []
+    real_cutout = pipeline.remove_background
+
+    def cutout(image, model_name):
+        if len(processed) == 1 and not reached.is_set():
+            reached.set()
+            raise _Killed()
+        processed.append(model_name)
+        return real_cutout(image, model_name)
+
+    monkeypatch.setattr(pipeline, "remove_background", cutout)
+
+    job = finished_preview(jobs)
+    jobs.start_run(job["id"])
+    wait()
+
+    assert len(processed) == 1
+    assert uploaded(drive) == []
+
+    again = restart(settings, connection)
+    assert again.current("sub-a")["status"] == INTERRUPTED
+
+    result = again.start_run(again.start_preview(SOURCE, TARGET)["id"])
+
+    assert result["summary"]["complete"] is True
+    assert result["summary"]["uploaded_now"] == 2
+    assert len(uploaded(drive)) == 2
+    # La primera foto no se vuelve a procesar.
+    assert len(processed) == 2
+
+
+def test_closed_right_after_an_upload_resumes_without_duplicates(
+    killable, settings, connection, drive, monkeypatch
+):
+    jobs, reached, wait = killable
+    add_photo(drive, "foto1")
+    add_photo(drive, "foto2")
+    real_create = drive.create
+
+    def create(kwargs):
+        created = real_create(kwargs)
+        if not reached.is_set():
+            # El PNG ya existe en Drive, pero la aplicación no llegó a
+            # registrarlo.
+            reached.set()
+            raise _Killed()
+        return created
+
+    monkeypatch.setattr(drive, "create", create)
+
+    job = finished_preview(jobs)
+    jobs.start_run(job["id"])
+    wait()
+
+    assert len(uploaded(drive)) == 1
+
+    again = restart(settings, connection)
+    preview_job = again.start_preview(SOURCE, TARGET)
+    result = again.start_run(preview_job["id"])
+
+    assert result["summary"]["complete"] is True
+    assert len(uploaded(drive)) == 2
+    assert len(drive.created) == 2
+    names = [item["name"] for item in uploaded(drive)]
+    assert len(set(names)) == 2
+
+
+def test_progress_is_visible_from_another_tab(slow_jobs, settings, connection, make_client):
+    first = make_client(settings, connection, jobs=slow_jobs)
+    job = first.post(
+        "/api/jobs/preview", json={"source_id": SOURCE, "target_id": TARGET}
+    ).json()
+    assert slow_jobs.started.wait(5)
+
+    # Otra pestaña: otra sesión del navegador contra el mismo servidor.
+    second = make_client(settings, connection, jobs=slow_jobs)
+    current = second.get("/api/jobs/current").json()["job"]
+
+    assert current["id"] == job["id"]
+    assert current["status"] == RUNNING
+    assert "progress" in current
+    slow_jobs.release.set()
+
+
 # Persistencia e interrupciones ---------------------------------------------
 
 def test_no_job_yet(jobs):

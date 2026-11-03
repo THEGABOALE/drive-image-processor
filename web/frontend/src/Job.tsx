@@ -12,8 +12,10 @@ const STAGE_NAMES: Record<string, string> = {
   upload: "la subida",
 };
 
+// En la vista previa, "complete" es lo hecho antes; en el resumen de una
+// ejecución incluye lo que se acaba de subir.
 const STATUS_LABELS: Record<JobItem["status"], string> = {
-  complete: "Ya está en Drive",
+  complete: "En Drive",
   planned: "Se procesa",
   failed: "Con error",
   pending: "Pendiente de confirmar",
@@ -29,15 +31,17 @@ const RELATED_LABELS: Record<string, string> = {
 const imageCount = (count: number) =>
   count === 1 ? "1 imagen" : `${count} imágenes`;
 
-function ItemRow({ item }: { item: JobItem }) {
+function ItemRow({ item, isPreview }: { item: JobItem; isPreview: boolean }) {
   const bad = item.status === "failed" || item.status === "pending";
+  const label =
+    isPreview && item.status === "complete" ? "Ya está en Drive" : STATUS_LABELS[item.status];
 
   return (
     <li>
       <div className="item-head">
         <span className="item-name">{item.name}</span>
         <span className={bad ? "item-status bad" : "item-status"}>
-          {STATUS_LABELS[item.status]}
+          {label}
           {bad && item.stage ? ` en ${STAGE_NAMES[item.stage]}` : ""}
         </span>
       </div>
@@ -145,7 +149,7 @@ function Summary({ job, busy, onRun }: { job: Job; busy: boolean; onRun: () => v
       {summary.items.length > 0 && (
         <ul className="items">
           {summary.items.map((item) => (
-            <ItemRow item={item} key={item.file_id} />
+            <ItemRow item={item} isPreview={isPreview} key={item.file_id} />
           ))}
         </ul>
       )}

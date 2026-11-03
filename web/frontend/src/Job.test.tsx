@@ -428,6 +428,39 @@ describe("ejecución", () => {
     expect(screen.getByText(/vuelva a generar la vista previa/i)).toBeTruthy();
   });
 
+  it("en el resumen, lo subido figura en Drive, no como si ya estuviera", async () => {
+    mockApi({
+      current: job({
+        kind: "run",
+        summary: summary({
+          counts: { complete: 1, planned: 0, failed: 0, pending: 0, not_started: 0 },
+          uploaded_now: 1,
+          can_run: false,
+          items: [item({ status: "complete", actions: [], undetermined: [] })],
+        }),
+      }),
+    });
+    renderApp();
+
+    expect(await screen.findByText("En Drive")).toBeTruthy();
+    expect(screen.queryByText("Ya está en Drive")).toBeNull();
+  });
+
+  it("en la vista previa, lo hecho antes figura como ya en Drive", async () => {
+    mockApi({
+      current: job({
+        summary: summary({
+          counts: { complete: 1, planned: 0, failed: 0, pending: 0, not_started: 0 },
+          can_run: false,
+          items: [item({ status: "complete", actions: [], undetermined: [] })],
+        }),
+      }),
+    });
+    renderApp();
+
+    expect(await screen.findByText("Ya está en Drive")).toBeTruthy();
+  });
+
   it("usa el singular cuando corresponde", async () => {
     mockApi({
       current: job({
