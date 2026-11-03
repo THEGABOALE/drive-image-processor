@@ -20,11 +20,24 @@ export type Connection = {
   account: Account | null;
 };
 
+export type OutputLimits = {
+  width: number;
+  height: number;
+  background: string;
+  backgrounds: string[];
+  min_side: number;
+  max_side: number;
+  max_pixels: number;
+};
+
+export type OutputOptions = { width: number; height: number; background: string };
+
 export type Status = {
   environment: "development" | "production";
   csrf_token: string;
   connection: Connection;
   picker: PickerConfig;
+  output?: OutputLimits;
 };
 
 export type Verification = {
@@ -74,6 +87,8 @@ export type Job = {
     items: JobItem[];
   } | null;
   error: { code: string; message: string } | null;
+  // Falta en los trabajos guardados antes de que existieran las opciones.
+  options?: OutputOptions;
 };
 
 export class ApiError extends Error {
@@ -150,8 +165,17 @@ export const verifyFolders = (csrf: string, sourceId: string, targetId: string) 
     target_id: targetId,
   });
 
-export const startPreview = (csrf: string, sourceId: string, targetId: string) =>
-  post<Job>("/api/jobs/preview", csrf, { source_id: sourceId, target_id: targetId });
+export const startPreview = (
+  csrf: string,
+  sourceId: string,
+  targetId: string,
+  options: OutputOptions,
+) =>
+  post<Job>("/api/jobs/preview", csrf, {
+    source_id: sourceId,
+    target_id: targetId,
+    options,
+  });
 
 // Las carpetas salen de la vista previa: esta solicitud no las envía.
 export const startRun = (csrf: string, previewId: string) =>

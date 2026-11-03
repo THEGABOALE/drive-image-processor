@@ -1,4 +1,5 @@
 import type { Job, JobItem } from "./api";
+import { describeOptions } from "./Output";
 
 const STAGES = [
   { key: "download", label: "Descarga" },
@@ -207,6 +208,8 @@ export default function JobPanel({
             : `De ${job.source.name} a ${job.target.name}`}
         </p>
       )}
+
+      {job.options && <p className="job-folders">{describeOptions(job.options)}</p>}
 
       {job.status === "running" && <Progress job={job} />}
       {job.status === "finished" && job.summary && (

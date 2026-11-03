@@ -29,10 +29,12 @@ import logging
 import threading
 import time
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 
 from image_processor import batch
 from image_processor.google_drive import downloads, sync, uploads
+from image_processor.processing import OutputOptions
 
 from .connection import NotConnectedError, State
 from .errors import RECONNECT_REQUIRED, ErrorInfo, describe_error
@@ -167,8 +169,10 @@ class JobManager:
 
     # Inicio -------------------------------------------------------------------
 
-    def start_preview(self, source_id: str, target_id: str) -> dict:
-        return self._start(PREVIEW, source_id, target_id, None)
+    def start_preview(
+        self, source_id: str, target_id: str, options: OutputOptions = OutputOptions()
+    ) -> dict:
+        return self._start(PREVIEW, source_id, target_id, None, options)
 
     def start_run(self, preview_id: str) -> dict:
         with self._lock:
@@ -179,14 +183,24 @@ class JobManager:
             self._load(sub)
             preview = self._usable_preview(preview_id)
 
+            # Las opciones son las de la vista previa (o las del motor, si se
+            # guardó antes de que existieran).
             return self._start(
                 RUN,
                 preview["source"]["id"],
                 preview["target"]["id"],
                 len(preview["summary"]["items"]),
+                OutputOptions(**(preview.get("options") or {})),
             )
 
-    def _start(self, kind: str, source_id: str, target_id: str, total: int | None) -> dict:
+    def _start(
+        self,
+        kind: str,
+        source_id: str,
+        target_id: str,
+        total: int | None,
+        options: OutputOptions,
+    ) -> dict:
         with self._lock:
             if self._active:
                 raise JobInProgressError()
@@ -199,6 +213,7 @@ class JobManager:
                 "source": {"id": source_id, "name": None},
                 "target": {"id": target_id, "name": None},
                 "same_folder": source_id == target_id,
+                "options": asdict(options),
                 "created_at": self._now(),
                 "finished_at": None,
                 "progress": _new_progress(total),
@@ -276,6 +291,7 @@ class JobManager:
                 output_dir=output_dir,
                 target_folder_id=target_id,
                 limit=None,
+                options=OutputOptions(**job["options"]),
                 dry_run=job["kind"] == PREVIEW,
                 on_event=lambda stage, *details: self._on_event(job, stage, details),
             )

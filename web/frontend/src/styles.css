@@ -184,6 +184,55 @@ h3 {
   border-left: 4px solid var(--alarm);
 }
 
+.output {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 1rem 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.3rem;
+  font-family: var(--display);
+  font-size: 0.9rem;
+}
+
+.field input {
+  width: 8rem;
+  padding: 0.45rem 0.6rem;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  color: var(--ink);
+  font: 400 1rem var(--body);
+}
+
+.backgrounds {
+  display: flex;
+  gap: 1.25rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.backgrounds legend {
+  margin-bottom: 0.3rem;
+  padding: 0;
+  font-family: var(--display);
+  font-size: 0.9rem;
+}
+
+.backgrounds .check {
+  margin: 0;
+}
+
+.field-error {
+  color: var(--alarm);
+  font-weight: 600;
+}
+
 .job-folders {
   margin: 0 0 1rem;
   color: var(--muted);

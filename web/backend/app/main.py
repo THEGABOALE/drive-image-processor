@@ -15,7 +15,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from image_processor.google_drive import queries
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from image_processor.processing import (
+    BACKGROUNDS,
+    DEFAULT_BACKGROUND,
+    DEFAULT_HEIGHT,
+    DEFAULT_WIDTH,
+    MAX_PIXELS,
+    MAX_SIDE,
+    MIN_SIDE,
+    OutputOptions,
+)
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from .connection import AlreadyConnectedError, ConnectionManager, NotConnectedError
 from .errors import RECONNECT_REQUIRED, describe_error
@@ -41,6 +51,20 @@ class FolderSelection(BaseModel):
     @classmethod
     def _valid_id(cls, value: str) -> str:
         return queries.validate_file_id(value)
+
+
+class OutputSettings(BaseModel):
+    """Tamaño y fondo del resultado. Los límites los valida el motor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    width: StrictInt
+    height: StrictInt
+    background: str = Field(max_length=32)
+
+
+class PreviewRequest(FolderSelection):
+    options: OutputSettings | None = None
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -145,6 +169,15 @@ def create_app(settings, manager: ConnectionManager, jobs: JobManager | None = N
                 "api_key": settings.picker_api_key,
                 "project_number": settings.project_number,
             },
+            "output": {
+                "width": DEFAULT_WIDTH,
+                "height": DEFAULT_HEIGHT,
+                "background": DEFAULT_BACKGROUND,
+                "backgrounds": list(BACKGROUNDS),
+                "min_side": MIN_SIDE,
+                "max_side": MAX_SIDE,
+                "max_pixels": MAX_PIXELS,
+            },
         }
 
     @app.post("/api/connection/start")
@@ -207,9 +240,19 @@ def create_app(settings, manager: ConnectionManager, jobs: JobManager | None = N
         return {"job": jobs.current(account.sub if account else None)}
 
     @app.post("/api/jobs/preview")
-    def start_preview(selection: FolderSelection):
+    def start_preview(request: PreviewRequest):
         try:
-            return jobs.start_preview(selection.source_id, selection.target_id)
+            options = (
+                OutputOptions(**request.options.model_dump())
+                if request.options
+                else OutputOptions()
+            )
+        except ValueError as exc:
+            # Mensajes del motor: indican el límite, sin datos sensibles.
+            return _error(422, "invalid_options", str(exc))
+
+        try:
+            return jobs.start_preview(request.source_id, request.target_id, options)
         except NotConnectedError:
             return _error(*_NOT_CONNECTED)
         except JobInProgressError:

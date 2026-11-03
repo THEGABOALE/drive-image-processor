@@ -21,6 +21,7 @@ import {
   type PickerConfig,
 } from "./google/picker";
 import JobPanel from "./Job";
+import OutputForm, { draftFrom, optionsFrom, outputProblem, type OutputDraft } from "./Output";
 import "./styles.css";
 
 type PickerLike = Pick<GooglePicker, "pick" | "forget">;
@@ -53,6 +54,7 @@ export default function App({
   const [busy, setBusy] = useState(false);
   const [pickerReady, setPickerReady] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
+  const [output, setOutput] = useState<OutputDraft | null>(null);
   const picker = useRef<PickerLike | null>(null);
   const apis = useRef<Promise<void> | null>(null);
 
@@ -63,6 +65,13 @@ export default function App({
     connection?.state === "connected" ? (connection.account?.sub ?? "") : null;
   const authorizing = connection ? AUTHORIZING_STEP[connection.state] : undefined;
   const jobRunning = job?.status === "running";
+  const limits = status?.output;
+  const problem_ = output && limits ? outputProblem(output, limits) : null;
+
+  // Los valores por defecto los informa el backend (los del motor).
+  useEffect(() => {
+    if (limits && output === null) setOutput(draftFrom(limits));
+  }, [limits, output]);
 
   const refresh = useCallback(async () => {
     setStatus(await getStatus());
@@ -181,9 +190,14 @@ export default function App({
   const preview = () =>
     run(async () => {
       const targetId = sameFolder ? source?.id : target?.id;
-      if (!source || !targetId) return;
-      setJob(await startPreview(csrf, source.id, targetId));
+      if (!source || !targetId || !output || problem_) return;
+      setJob(await startPreview(csrf, source.id, targetId, optionsFrom(output)));
     });
+
+  const changeOutput = (draft: OutputDraft) => {
+    setOutput(draft);
+    setJob(null);
+  };
 
   const execute = () =>
     run(async () => {
@@ -300,12 +314,22 @@ export default function App({
                 </p>
               )}
               {verification && !jobRunning && (
-                <button onClick={preview} disabled={busy}>
+                <button onClick={preview} disabled={busy || Boolean(problem_) || !output}>
                   Ver vista previa
                 </button>
               )}
             </div>
           </section>
+        )}
+
+        {connection?.state === "connected" && limits && output && (
+          <OutputForm
+            draft={output}
+            limits={limits}
+            disabled={jobRunning}
+            problem={problem_}
+            onChange={changeOutput}
+          />
         )}
 
         {connection?.state === "connected" && job && (

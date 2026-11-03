@@ -6,6 +6,16 @@ import type { Job, JobItem } from "./api";
 const ACCOUNT = { sub: "sub-a", email: "prueba@example.com", display_name: "Prueba" };
 const CSRF = "token-csrf-de-prueba";
 const JOB_ID = "a".repeat(32);
+const OUTPUT = {
+  width: 400,
+  height: 400,
+  background: "white",
+  backgrounds: ["white", "transparent"],
+  min_side: 64,
+  max_side: 6000,
+  max_pixels: 16_000_000,
+};
+const DEFAULT_OPTIONS = { width: 400, height: 400, background: "white" };
 
 function item(overrides: Partial<JobItem> = {}): JobItem {
   return {
@@ -55,6 +65,7 @@ function job(overrides: Partial<Job> = {}): Job {
     },
     summary: summary(),
     error: null,
+    options: DEFAULT_OPTIONS,
     ...overrides,
   };
 }
@@ -87,6 +98,7 @@ function mockApi(initial: {
                 csrf_token: CSRF,
                 connection: server.connection,
                 picker: { client_id: "123-web", api_key: "clave", project_number: "123" },
+                output: OUTPUT,
               },
             });
       return {
@@ -169,6 +181,7 @@ describe("vista previa", () => {
     expect(JSON.parse(post.init!.body as string)).toEqual({
       source_id: "origen",
       target_id: "destino",
+      options: DEFAULT_OPTIONS,
     });
     expect((post.init!.headers as Record<string, string>)["X-CSRF-Token"]).toBe(CSRF);
     expect(screen.getByText("Se procesa")).toBeTruthy();
@@ -202,6 +215,7 @@ describe("vista previa", () => {
     expect(JSON.parse(post.init!.body as string)).toEqual({
       source_id: "origen",
       target_id: "origen",
+      options: DEFAULT_OPTIONS,
     });
   });
 
@@ -234,6 +248,7 @@ describe("vista previa", () => {
     expect(JSON.parse(post.init!.body as string)).toEqual({
       source_id: "origen",
       target_id: "origen",
+      options: DEFAULT_OPTIONS,
     });
   });
 
@@ -652,5 +667,114 @@ describe("relación con las carpetas", () => {
     expect(JSON.stringify(calls.map((c) => c.init ?? null))).not.toMatch(
       /access_token|Bearer|Authorization/i,
     );
+  });
+});
+
+describe("tamaño y fondo del resultado", () => {
+  async function ready() {
+    const { calls } = mockApi({
+      routes: {
+        "/api/folders/verify": verified,
+        "/api/jobs/preview": () => ({ body: job() }),
+      },
+    });
+    renderApp(folders);
+    await selectAndVerify();
+    return calls;
+  }
+
+  const width = () => screen.getByLabelText(/ancho/i) as HTMLInputElement;
+  const height = () => screen.getByLabelText(/alto/i) as HTMLInputElement;
+  const previewButton = () =>
+    screen.getByRole("button", { name: /ver vista previa/i }) as HTMLButtonElement;
+
+  it("por defecto es 400 x 400 con fondo blanco", async () => {
+    await ready();
+
+    expect(width().value).toBe("400");
+    expect(height().value).toBe("400");
+    expect((screen.getByLabelText(/blanco/i) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText(/transparente/i) as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("envía el tamaño y el fondo elegidos con la vista previa", async () => {
+    const calls = await ready();
+
+    fireEvent.change(width(), { target: { value: "800" } });
+    fireEvent.change(height(), { target: { value: "600" } });
+    fireEvent.click(screen.getByLabelText(/transparente/i));
+    fireEvent.click(previewButton());
+    await screen.findByText("foto1.jpg");
+
+    const post = posts(calls).find((c) => c.url === "/api/jobs/preview")!;
+    expect(JSON.parse(post.init!.body as string).options).toEqual({
+      width: 800,
+      height: 600,
+      background: "transparent",
+    });
+  });
+
+  it.each([
+    ["un lado menor que el mínimo", "63", "400", /entre 64 y 6000/],
+    ["un lado mayor que el máximo", "400", "6001", /entre 64 y 6000/],
+    ["un número con decimales", "400.5", "400", /número entero/],
+    ["un campo vacío", "", "400", /número entero/],
+    ["demasiados píxeles", "5000", "5000", /16\.000\.000|16000000|16,000,000/],
+  ])("no permite la vista previa con %s", async (_name, w, h, message) => {
+    const calls = await ready();
+
+    fireEvent.change(width(), { target: { value: w } });
+    fireEvent.change(height(), { target: { value: h } });
+
+    expect(previewButton().disabled).toBe(true);
+    expect(screen.getByText(message)).toBeTruthy();
+    fireEvent.click(previewButton());
+    expect(posts(calls).some((c) => c.url === "/api/jobs/preview")).toBe(false);
+  });
+
+  it("cambiar una opción oculta la vista previa anterior", async () => {
+    await ready();
+    fireEvent.click(previewButton());
+    await screen.findByText("foto1.jpg");
+
+    fireEvent.click(screen.getByLabelText(/transparente/i));
+
+    expect(screen.queryByText("foto1.jpg")).toBeNull();
+    expect(screen.queryByRole("button", { name: /procesar/i })).toBeNull();
+  });
+
+  it("no se pueden cambiar mientras hay un trabajo en curso", async () => {
+    mockApi({
+      current: job({ kind: "run", status: "running", summary: null }),
+    });
+    renderApp();
+
+    await waitFor(() => expect(width().disabled).toBe(true));
+    expect(height().disabled).toBe(true);
+    expect((screen.getByLabelText(/transparente/i) as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it("muestra las opciones del trabajo", async () => {
+    mockApi({
+      current: job({ options: { width: 800, height: 600, background: "transparent" } }),
+    });
+    renderApp();
+
+    expect(await screen.findByText(/800 × 600 px, fondo transparente/)).toBeTruthy();
+  });
+
+  it("un trabajo guardado sin opciones se muestra igual", async () => {
+    const old = job();
+    delete (old as Partial<Job>).options;
+    mockApi({ current: old });
+    renderApp();
+
+    expect(await screen.findByText("foto1.jpg")).toBeTruthy();
+  });
+
+  it("avisa que otras opciones crean resultados nuevos", async () => {
+    await ready();
+
+    expect(screen.getByText(/se crean resultados nuevos/i)).toBeTruthy();
   });
 });

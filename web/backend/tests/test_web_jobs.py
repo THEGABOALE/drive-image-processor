@@ -221,7 +221,8 @@ def test_preview_uses_defaults_of_the_engine_for_all_images(settings, connection
     assert calls[0]["dry_run"] is True
     assert calls[0]["folder_id"] == SOURCE
     assert calls[0]["target_folder_id"] == TARGET
-    assert "options" not in calls[0] and "model_name" not in calls[0]
+    assert calls[0]["options"] == OutputOptions()
+    assert "model_name" not in calls[0]
 
 
 # Ejecución -------------------------------------------------------------------
@@ -1107,3 +1108,169 @@ def test_api_responses_have_no_secrets(api, drive):
 
     for secret in ("refresh-lectura", "refresh-escritura", DESKTOP_SECRET):
         assert secret not in job.text + run.text
+
+
+# Tamaño y fondo del resultado -------------------------------------------------
+
+from image_processor.processing import OutputOptions  # noqa: E402
+
+
+def local_pngs(settings, source=SOURCE):
+    _, output_dir = folder_dirs(settings, "sub-a", source)
+    return sorted(output_dir.glob("*.png"))
+
+
+def test_preview_without_options_uses_400_by_400_white(jobs, drive):
+    add_photo(drive, "foto1")
+
+    job = preview(jobs)
+
+    assert job["options"] == {"width": 400, "height": 400, "background": "white"}
+
+
+def test_default_result_is_400_by_400_on_white(jobs, drive, settings):
+    add_photo(drive, "foto1")
+
+    previewed_and_run(jobs)
+
+    (png,) = local_pngs(settings)
+    # Sin sufijo de configuración: es la del motor por defecto.
+    assert png.name.startswith("TRANSFORMADA_") and "__" not in png.name
+    with Image.open(png) as image:
+        assert image.size == (400, 400)
+        assert image.convert("RGBA").getpixel((0, 0)) == (255, 255, 255, 255)
+
+
+def test_custom_size_and_transparent_background(jobs, drive, settings):
+    add_photo(drive, "foto1")
+    options = OutputOptions(width=800, height=600, background="transparent")
+
+    job = jobs.start_preview(SOURCE, TARGET, options)
+    assert job["options"] == {"width": 800, "height": 600, "background": "transparent"}
+    result = jobs.start_run(job["id"])
+
+    assert result["options"] == job["options"]
+    (png,) = local_pngs(settings)
+    assert png.name.endswith("__800x600_transparent.png")
+    with Image.open(png) as image:
+        assert image.size == (800, 600)
+        assert image.mode == "RGBA"
+        assert image.getpixel((0, 0))[3] == 0
+    # En Drive el nombre no lleva el ID que distingue la copia local.
+    (remote,) = uploaded(drive)
+    assert remote["name"].endswith("__800x600_transparent.png")
+
+
+def test_the_run_uses_the_options_of_its_preview(settings, connection, drive):
+    add_photo(drive, "foto1")
+    seen = []
+
+    def spy(read, write, **kwargs):
+        seen.append(kwargs["options"])
+        return sync.sync(read, write, **kwargs)
+
+    jobs = JobManager(settings, connection, start_thread=lambda t: t(), runner=spy)
+    options = OutputOptions(width=500, height=300, background="transparent")
+    job = jobs.start_preview(SOURCE, TARGET, options)
+    jobs.start_run(job["id"])
+
+    assert seen == [options, options]
+
+
+def test_other_options_create_new_results_and_keep_the_old(jobs, drive, ai):
+    add_photo(drive, "foto1")
+    previewed_and_run(jobs)
+    first = [item["name"] for item in uploaded(drive)]
+
+    options = OutputOptions(width=600, height=600, background="white")
+    job = jobs.start_preview(SOURCE, TARGET, options)
+    assert job["summary"]["can_run"] is True
+    jobs.start_run(job["id"])
+
+    names = [item["name"] for item in uploaded(drive)]
+    assert len(names) == 2
+    assert first[0] in names
+    assert [n for n in names if n != first[0]][0].endswith("__600x600_white.png")
+
+    again = jobs.start_preview(SOURCE, TARGET, options)
+    assert again["summary"]["can_run"] is False
+    assert len(uploaded(drive)) == 2
+
+
+def test_a_saved_preview_without_options_runs_with_the_defaults(jobs, drive, settings):
+    add_photo(drive, "foto1")
+    preview(jobs)
+    # Formato anterior a las opciones.
+    del jobs._job["options"]
+
+    result = jobs.start_run(jobs._job["id"])
+
+    assert result["options"] == {"width": 400, "height": 400, "background": "white"}
+    (png,) = local_pngs(settings)
+    assert "__" not in png.name
+
+
+def test_api_status_has_the_engine_limits(api):
+    output = api.get("/api/status").json()["output"]
+
+    assert output == {
+        "width": 400,
+        "height": 400,
+        "background": "white",
+        "backgrounds": ["white", "transparent"],
+        "min_side": 64,
+        "max_side": 6000,
+        "max_pixels": 16_000_000,
+    }
+
+
+def test_api_preview_with_options(api, drive):
+    add_photo(drive, "foto1")
+
+    job = api.post("/api/jobs/preview", json={
+        "source_id": SOURCE, "target_id": TARGET,
+        "options": {"width": 1000, "height": 800, "background": "transparent"},
+    }).json()
+
+    assert job["options"] == {"width": 1000, "height": 800, "background": "transparent"}
+    run = api.post(f"/api/jobs/{job['id']}/run", json={"options": {"width": 64}}).json()
+    assert run["options"] == job["options"]
+
+
+@pytest.mark.parametrize(
+    "options, match",
+    [
+        ({"width": 63, "height": 400, "background": "white"}, "64"),
+        ({"width": 400, "height": 6001, "background": "white"}, "6000"),
+        ({"width": 5000, "height": 5000, "background": "white"}, "píxeles"),
+        ({"width": 400, "height": 400, "background": "azul"}, "Fondo"),
+    ],
+)
+def test_api_rejects_options_outside_the_engine_limits(api, drive, options, match):
+    response = api.post("/api/jobs/preview", json={
+        "source_id": SOURCE, "target_id": TARGET, "options": options,
+    })
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_options"
+    assert match in response.json()["error"]["message"]
+    assert api.get("/api/jobs/current").json() == {"job": None}
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"width": "400", "height": 400, "background": "white"},
+        {"width": True, "height": 400, "background": "white"},
+        {"width": 400.5, "height": 400, "background": "white"},
+        {"width": 400, "height": 400},
+        {"width": 400, "height": 400, "background": "white", "model": "u2net"},
+    ],
+)
+def test_api_rejects_malformed_options(api, drive, options):
+    response = api.post("/api/jobs/preview", json={
+        "source_id": SOURCE, "target_id": TARGET, "options": options,
+    })
+
+    assert response.status_code == 422
+    assert api.get("/api/jobs/current").json() == {"job": None}
