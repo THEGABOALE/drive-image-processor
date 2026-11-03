@@ -25,6 +25,22 @@ except ImportError:
     collect_ignore_glob = ["test_*.py"]
 
 
+@pytest.fixture(autouse=True)
+def forbid_real_models():
+    """Ninguna prueba puede crear una sesión real de rembg."""
+    from image_processor import background_removal
+
+    def forbidden_session(model_name):
+        raise AssertionError(f"una prueba intentó crear una sesión real de {model_name}")
+
+    guard = pytest.MonkeyPatch()
+    background_removal._get_session.cache_clear()
+    guard.setattr(background_removal, "new_session", forbidden_session)
+    yield
+    guard.undo()
+    background_removal._get_session.cache_clear()
+
+
 PROJECT_ID = "drive-image-processor-dev"
 PROJECT_NUMBER = "123456789012"
 DESKTOP_CLIENT_ID = f"{PROJECT_NUMBER}-desktop.apps.googleusercontent.com"
@@ -218,8 +234,8 @@ def make_client():
 
     from web.backend.app.main import create_app
 
-    def build(settings, manager, origin="http://localhost:5173"):
-        app = create_app(settings, manager)
+    def build(settings, manager, origin="http://localhost:5173", jobs=None):
+        app = create_app(settings, manager, jobs)
         client = TestClient(
             app, base_url="http://localhost:8000", raise_server_exceptions=False
         )

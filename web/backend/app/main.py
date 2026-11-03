@@ -10,26 +10,17 @@ token CSRF de esta ejecución, que solo una página del mismo origen puede leer.
 import logging
 import secrets
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Path, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from image_processor.google_drive import queries
-from image_processor.google_drive.errors import (
-    DriveAccessError,
-    DriveAuthError,
-    DriveError,
-    DriveNotAFolderError,
-    DriveNotFoundError,
-    DriveQuotaError,
-    DriveSecureConnectionError,
-    DriveTransientError,
-    DriveWriteAccessError,
-)
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .connection import AlreadyConnectedError, ConnectionManager, NotConnectedError
-from .folders import SourceNotAuthorizedError, verify_folders
+from .errors import RECONNECT_REQUIRED, describe_error
+from .folders import verify_folders
+from .jobs import JobInProgressError, JobManager, PreviewNotUsableError
 
 
 logger = logging.getLogger(__name__)
@@ -38,52 +29,6 @@ _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 # Sec-Fetch-Site aceptados. Otro puerto de localhost es "same-site".
 _ALLOWED_FETCH_SITES = {None, "same-origin", "none"}
-
-# Solo mensajes propios: los del motor pueden citar comandos de la CLI. El
-# orden importa: las subclases van antes.
-_FOLDER_ERRORS = (
-    (
-        SourceNotAuthorizedError, 409, "source_not_authorized",
-        "La carpeta de origen no está autorizada para la cuenta conectada. "
-        "Elíjala de nuevo con Google Picker usando esa misma cuenta.",
-    ),
-    (
-        DriveWriteAccessError, 409, "target_not_authorized",
-        "La cuenta conectada no puede crear archivos en la carpeta de destino. "
-        "Elíjala de nuevo con Google Picker usando esa misma cuenta; si es "
-        "compartida, necesita permiso de edición.",
-    ),
-    (
-        DriveNotAFolderError, 422, "not_a_folder",
-        "El elemento elegido no es una carpeta.",
-    ),
-    (
-        DriveNotFoundError, 404, "folder_not_found",
-        "La carpeta no existe o la cuenta conectada no puede verla.",
-    ),
-    (
-        DriveQuotaError, 503, "quota_exceeded",
-        "Se agotó la cuota de Google Drive. Inténtelo de nuevo más tarde.",
-    ),
-    (
-        DriveSecureConnectionError, 502, "secure_connection_error",
-        "No se pudo establecer una conexión segura con Google. Revise la red "
-        "o el proxy. La verificación no se desactiva.",
-    ),
-    (
-        DriveTransientError, 503, "network_error",
-        "No se pudo comunicar con Google Drive. Inténtelo de nuevo.",
-    ),
-    (
-        DriveAccessError, 403, "access_denied",
-        "Google Drive denegó el acceso a la carpeta.",
-    ),
-    (
-        DriveError, 502, "drive_error",
-        "Google Drive respondió con un error.",
-    ),
-)
-
 
 class FolderSelection(BaseModel):
     # Solo los IDs: nunca se acepta otra cosa, como un token del navegador.
@@ -120,7 +65,14 @@ def _status_json(manager: ConnectionManager) -> dict:
     }
 
 
-def create_app(settings, manager: ConnectionManager) -> FastAPI:
+_NOT_CONNECTED = 401, "not_connected", "No hay una cuenta conectada."
+_JOB_IN_PROGRESS = (
+    409, "job_in_progress", "Hay un trabajo en curso. Espere a que termine."
+)
+
+
+def create_app(settings, manager: ConnectionManager, jobs: JobManager | None = None) -> FastAPI:
+    jobs = jobs or JobManager(settings, manager)
     app = FastAPI(
         title="Drive Image Processor", docs_url=None, redoc_url=None, openapi_url=None
     )
@@ -214,7 +166,11 @@ def create_app(settings, manager: ConnectionManager) -> FastAPI:
 
     @app.post("/api/connection/disconnect")
     def disconnect():
-        manager.disconnect()
+        try:
+            jobs.while_idle(manager.disconnect)
+        except JobInProgressError:
+            return _error(*_JOB_IN_PROGRESS)
+
         return _status_json(manager)
 
     @app.post("/api/folders/verify")
@@ -226,26 +182,50 @@ def create_app(settings, manager: ConnectionManager) -> FastAPI:
             )
 
         except NotConnectedError:
-            return _error(401, "not_connected", "No hay una cuenta conectada.")
-
-        except DriveAuthError:
-            manager.mark_expired()
-            return _error(
-                401, "reconnect_required",
-                "La autorización expiró o fue revocada. Vuelva a conectar la cuenta.",
-            )
+            return _error(*_NOT_CONNECTED)
 
         except Exception as exc:
-            for kind, status_code, code, message in _FOLDER_ERRORS:
-                if isinstance(exc, kind):
-                    return _error(status_code, code, message)
-            raise
+            info = describe_error(exc)
+
+            if info is None:
+                raise
+
+            if info.code == RECONNECT_REQUIRED:
+                manager.mark_expired()
+
+            return _error(info.status, info.code, info.message)
 
         return {
             "source": {"id": result.source.id, "name": result.source.name},
             "target": {"id": result.target.folder.id, "name": result.target.folder.name},
             "same_folder": result.same_folder,
         }
+
+    @app.get("/api/jobs/current")
+    def current_job():
+        account = manager.status().account
+        return {"job": jobs.current(account.sub if account else None)}
+
+    @app.post("/api/jobs/preview")
+    def start_preview(selection: FolderSelection):
+        try:
+            return jobs.start_preview(selection.source_id, selection.target_id)
+        except NotConnectedError:
+            return _error(*_NOT_CONNECTED)
+        except JobInProgressError:
+            return _error(*_JOB_IN_PROGRESS)
+
+    @app.post("/api/jobs/{preview_id}/run")
+    def start_run(preview_id: str = Path(pattern="^[0-9a-f]{32}$")):
+        # Las carpetas salen de la vista previa, nunca de esta solicitud.
+        try:
+            return jobs.start_run(preview_id)
+        except NotConnectedError:
+            return _error(*_NOT_CONNECTED)
+        except JobInProgressError:
+            return _error(*_JOB_IN_PROGRESS)
+        except PreviewNotUsableError as exc:
+            return _error(409, exc.code, exc.message)
 
     if settings.frontend_dist.is_dir():
         app.mount("/", StaticFiles(directory=settings.frontend_dist, html=True))

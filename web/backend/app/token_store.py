@@ -36,6 +36,32 @@ class TokenStore(Protocol):
         """Elimina los datos. Devuelve False si no había."""
 
 
+def write_atomic(path: Path, content: bytes) -> None:
+    """Reemplaza el archivo solo si el contenido se escribió completo."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+
+    try:
+        with os.fdopen(fd, "wb") as target:
+            target.write(content)
+            target.flush()
+            os.fsync(target.fileno())
+
+        os.replace(tmp_name, path)
+
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 class EncryptedFileTokenStore:
     """Un archivo cifrado con las funciones protect y unprotect."""
 
@@ -67,27 +93,7 @@ class EncryptedFileTokenStore:
         return data
 
     def save(self, data: dict) -> None:
-        content = self._protect(json.dumps(data).encode("utf-8"))
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-
-        fd, tmp_name = tempfile.mkstemp(
-            dir=self._path.parent, prefix=f".{self._path.name}.", suffix=".tmp"
-        )
-
-        try:
-            with os.fdopen(fd, "wb") as target:
-                target.write(content)
-                target.flush()
-                os.fsync(target.fileno())
-
-            os.replace(tmp_name, self._path)
-
-        except BaseException:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
+        write_atomic(self._path, self._protect(json.dumps(data).encode("utf-8")))
 
     def clear(self) -> bool:
         try:

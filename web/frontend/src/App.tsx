@@ -3,10 +3,14 @@ import {
   ApiError,
   cancelConnection,
   disconnect,
+  getCurrentJob,
   getStatus,
   startConnection,
+  startPreview,
+  startRun,
   verifyFolders,
   type Connection,
+  type Job,
   type Status,
   type Verification,
 } from "./api";
@@ -16,6 +20,7 @@ import {
   type PickedFolder,
   type PickerConfig,
 } from "./google/picker";
+import JobPanel from "./Job";
 import "./styles.css";
 
 type PickerLike = Pick<GooglePicker, "pick" | "forget">;
@@ -47,6 +52,7 @@ export default function App({
   const [verification, setVerification] = useState<Verification | null>(null);
   const [busy, setBusy] = useState(false);
   const [pickerReady, setPickerReady] = useState(false);
+  const [job, setJob] = useState<Job | null>(null);
   const picker = useRef<PickerLike | null>(null);
   const apis = useRef<Promise<void> | null>(null);
 
@@ -56,6 +62,7 @@ export default function App({
   const connectedSub =
     connection?.state === "connected" ? (connection.account?.sub ?? "") : null;
   const authorizing = connection ? AUTHORIZING_STEP[connection.state] : undefined;
+  const jobRunning = job?.status === "running";
 
   const refresh = useCallback(async () => {
     setStatus(await getStatus());
@@ -72,6 +79,24 @@ export default function App({
     }, pollMs);
     return () => clearInterval(timer);
   }, [authorizing, refresh, pollMs]);
+
+  // El trabajo sigue en el backend aunque se cierre o recargue la página.
+  useEffect(() => {
+    if (connectedSub === null) return;
+    getCurrentJob()
+      .then(setJob)
+      .catch((error) => setProblem(message(error)));
+  }, [connectedSub]);
+
+  useEffect(() => {
+    if (!jobRunning) return;
+    const timer = setInterval(() => {
+      Promise.all([getCurrentJob(), refresh()])
+        .then(([current]) => setJob(current))
+        .catch(() => {});
+    }, pollMs);
+    return () => clearInterval(timer);
+  }, [jobRunning, refresh, pollMs]);
 
   // El Picker y lo elegido pertenecen a la cuenta conectada.
   useEffect(() => {
@@ -91,6 +116,7 @@ export default function App({
       setTarget(null);
       setSameFolder(false);
       setVerification(null);
+      setJob(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectedSub, pickerConfig?.client_id]);
@@ -123,6 +149,7 @@ export default function App({
       const folder = await picker.current?.pick(title);
       if (folder) {
         setVerification(null);
+        setJob(null);
         assign(folder);
       }
     });
@@ -148,7 +175,20 @@ export default function App({
   const toggleSameFolder = (checked: boolean) => {
     setSameFolder(checked);
     setVerification(null);
+    setJob(null);
   };
+
+  const preview = () =>
+    run(async () => {
+      const targetId = sameFolder ? source?.id : target?.id;
+      if (!source || !targetId) return;
+      setJob(await startPreview(csrf, source.id, targetId));
+    });
+
+  const execute = () =>
+    run(async () => {
+      if (job) setJob(await startRun(csrf, job.id));
+    });
 
   const ready = Boolean(source && (sameFolder || target));
   const connectionAlert = connection?.error ? connection.message : null;
@@ -178,7 +218,7 @@ export default function App({
                   <p className="muted">{connection.account.display_name}</p>
                 )}
               </div>
-              <button className="quiet" onClick={leave} disabled={busy}>
+              <button className="quiet" onClick={leave} disabled={busy || jobRunning}>
                 Desconectar
               </button>
             </div>
@@ -223,6 +263,7 @@ export default function App({
               <input
                 type="checkbox"
                 checked={sameFolder}
+                disabled={jobRunning}
                 onChange={(event) => toggleSameFolder(event.target.checked)}
               />
               Usar la misma carpeta como origen y destino
@@ -233,7 +274,7 @@ export default function App({
                 label="Carpeta de origen"
                 action="origen"
                 folder={source}
-                busy={busy || !pickerReady}
+                busy={busy || !pickerReady || jobRunning}
                 onChoose={() => choose("Elegir la carpeta de origen", setSource)}
               />
               {!sameFolder && (
@@ -241,14 +282,14 @@ export default function App({
                   label="Carpeta de destino"
                   action="destino"
                   folder={target}
-                  busy={busy || !pickerReady}
+                  busy={busy || !pickerReady || jobRunning}
                   onChoose={() => choose("Elegir la carpeta de destino", setTarget)}
                 />
               )}
             </div>
 
             <div className="verify">
-              <button onClick={verify} disabled={busy || !ready}>
+              <button onClick={verify} disabled={busy || !ready || jobRunning}>
                 Verificar carpetas
               </button>
               {verification && (
@@ -258,8 +299,17 @@ export default function App({
                     : "Carpetas verificadas: se pueden leer los originales y crear los resultados."}
                 </p>
               )}
+              {verification && !jobRunning && (
+                <button onClick={preview} disabled={busy}>
+                  Ver vista previa
+                </button>
+              )}
             </div>
           </section>
+        )}
+
+        {connection?.state === "connected" && job && (
+          <JobPanel job={job} busy={busy} onRun={execute} />
         )}
 
         {(problem || connectionAlert) && (

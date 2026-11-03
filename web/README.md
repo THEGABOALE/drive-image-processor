@@ -4,8 +4,9 @@ Interfaz local para Windows sobre el motor de `image_processor`, que se usa
 como biblioteca y no cambia. Se abre en el navegador y escucha solo en
 `127.0.0.1`.
 
-Fase 1: conectar y desconectar una cuenta de Google, elegir las carpetas con
-Google Picker y verificarlas. Todavía no procesa imágenes.
+Permite conectar una cuenta de Google, elegir las carpetas con Google Picker,
+revisar una vista previa, procesar las imágenes y ver el progreso y el resumen.
+Todavía no se distribuye como ejecutable.
 
 ## Arquitectura
 
@@ -125,6 +126,39 @@ Para revocar: <https://myaccount.google.com/permissions>.
 
 La CLI y la aplicación comparten el cliente de escritorio en desarrollo, pero no
 los tokens: la aplicación nunca lee ni escribe `.secrets/token*.json`.
+
+## Vista previa y procesamiento
+
+1. **Vista previa:** el motor arma el plan (`sync` con `dry_run=True`), sin escribir
+   en Drive ni en disco y sin cargar el modelo. Lo que depende de una descarga o de
+   un procesamiento se sabe recién al ejecutar.
+2. **Procesar:** solo se puede ejecutar la última vista previa, terminada, sin usar
+   y de hace menos de una hora, y de ella salen las carpetas: el frontend no las
+   envía. El permiso se comprueba de nuevo antes de empezar.
+3. **Progreso y resumen:** el trabajo corre en el backend. Se puede cerrar la pestaña
+   y volver mientras la aplicación siga abierta. El último trabajo de cada cuenta se
+   guarda en disco.
+
+Hay un solo trabajo a la vez. Mientras uno está activo no se puede desconectar la
+cuenta ni iniciar otro, y **no se puede cancelar**, porque el motor no lo permite.
+Si la aplicación se cierra, el trabajo figura como interrumpido: al ejecutar de
+nuevo se retoma sin duplicar.
+
+Usa los valores del motor: 400×400, fondo blanco y todas las imágenes de la carpeta.
+Los originales nunca se modifican ni se borran.
+
+**Limitación.** El motor rehace el plan al ejecutar: lo que se agregue a la carpeta
+después de la vista previa también se procesa. Por eso la vista previa vence.
+
+**Datos locales**, en `%LOCALAPPDATA%\DriveImageProcessor\<entorno>\accounts\<cuenta>`:
+
+- `folders\<origen>\downloads` y `outputs`: originales, resultados y los registros
+  del motor. **No hay que borrarlos:** son los que evitan los duplicados en Drive. El
+  espacio que ocupan crece con cada carpeta.
+- `last_job.json`: el último trabajo.
+
+La primera ejecución descarga el modelo de IA a la caché de rembg y puede tardar
+varios minutos.
 
 ## Configuración manual en Google Cloud
 

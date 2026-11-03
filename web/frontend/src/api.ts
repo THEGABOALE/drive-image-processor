@@ -33,6 +33,49 @@ export type Verification = {
   same_folder: boolean;
 };
 
+export type StageProgress = { done: number; failed: number };
+
+export type JobItem = {
+  file_id: string;
+  name: string;
+  status: "complete" | "planned" | "failed" | "pending" | "not_started";
+  stage: "download" | "processing" | "upload" | null;
+  reason: string | null;
+  actions: string[];
+  undetermined: string[];
+  notes: string[];
+  related: { kind: string; name: string }[];
+};
+
+export type Job = {
+  id: string;
+  kind: "preview" | "run";
+  status: "running" | "finished" | "failed" | "interrupted";
+  source: { id: string; name: string | null };
+  target: { id: string; name: string | null };
+  same_folder: boolean;
+  created_at: number;
+  finished_at: number | null;
+  progress: {
+    total: number | null;
+    stage: string | null;
+    current: string | null;
+    download: StageProgress;
+    processing: StageProgress;
+    upload: StageProgress;
+  };
+  summary: {
+    counts: Record<JobItem["status"], number>;
+    uploaded_now: number;
+    complete: boolean;
+    can_run: boolean;
+    stopped: { stage: string; code: string; message: string } | null;
+    warnings: string[];
+    items: JobItem[];
+  } | null;
+  error: { code: string; message: string } | null;
+};
+
 export class ApiError extends Error {
   constructor(
     readonly code: string,
@@ -69,6 +112,15 @@ export async function getStatus(): Promise<Status> {
   }
 }
 
+export async function getCurrentJob(): Promise<Job | null> {
+  try {
+    const body = await parse<{ job?: Job | null }>(await fetch("/api/jobs/current"));
+    return body.job ?? null;
+  } catch (error) {
+    throw error instanceof ApiError ? error : UNREACHABLE;
+  }
+}
+
 async function post<T>(path: string, csrfToken: string, body?: unknown): Promise<T> {
   try {
     const response = await fetch(path, {
@@ -97,3 +149,10 @@ export const verifyFolders = (csrf: string, sourceId: string, targetId: string) 
     source_id: sourceId,
     target_id: targetId,
   });
+
+export const startPreview = (csrf: string, sourceId: string, targetId: string) =>
+  post<Job>("/api/jobs/preview", csrf, { source_id: sourceId, target_id: targetId });
+
+// Las carpetas salen de la vista previa: esta solicitud no las envía.
+export const startRun = (csrf: string, previewId: string) =>
+  post<Job>(`/api/jobs/${previewId}/run`, csrf);

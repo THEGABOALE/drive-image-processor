@@ -184,6 +184,91 @@ h3 {
   border-left: 4px solid var(--alarm);
 }
 
+.job-folders {
+  margin: 0 0 1rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.progress {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+}
+
+.progress li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+}
+
+.progress li span:first-child {
+  font-family: var(--display);
+  font-weight: 600;
+}
+
+.progress .active {
+  border-left: 4px solid var(--signal);
+}
+
+.counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+  font-family: var(--display);
+}
+
+.items {
+  display: grid;
+  gap: 0;
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--rule);
+}
+
+.items li {
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.item-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.15rem 1rem;
+}
+
+.item-name {
+  overflow-wrap: anywhere;
+}
+
+.item-status {
+  color: var(--muted);
+  font-family: var(--display);
+  font-size: 0.9rem;
+}
+
+.item-status.bad {
+  color: var(--alarm);
+}
+
+.item-detail {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  overflow-wrap: anywhere;
+}
+
 button {
   padding: 0.55rem 1.1rem;
   background: var(--signal);
