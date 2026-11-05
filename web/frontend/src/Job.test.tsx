@@ -1151,4 +1151,3 @@ describe("textos de la interfaz", () => {
     expect(document.querySelector("[contenteditable]")).toBeNull();
   });
 });
-

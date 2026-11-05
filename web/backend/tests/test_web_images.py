@@ -486,4 +486,3 @@ def test_alignment_needs_the_result_too(api, aligned_setup, jobs):
 
     assert response.status_code == 200
     assert open_png(response.content).size == (1000, 800)
-
