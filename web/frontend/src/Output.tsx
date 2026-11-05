@@ -44,20 +44,6 @@ export function describeOptions(options: OutputOptions): string {
   return `${options.width} × ${options.height} px, fondo ${background}`;
 }
 
-/** Un lienzo de muestra con la proporción y el fondo elegidos. */
-function CanvasSample({ draft, valid }: { draft: OutputDraft; valid: boolean }) {
-  const ratio = valid ? `${draft.width} / ${draft.height}` : "1 / 1";
-
-  return (
-    <div className="canvas-sample" aria-hidden="true">
-      <div className={`canvas canvas-${draft.background}`} style={{ aspectRatio: ratio }}>
-        <span className="canvas-product" />
-      </div>
-      <span className="canvas-size">{valid ? `${draft.width} × ${draft.height}` : "—"}</span>
-    </div>
-  );
-}
-
 export default function OutputForm({
   draft,
   limits,
@@ -125,8 +111,6 @@ export default function OutputForm({
         </fieldset>
 
       </div>
-
-      <CanvasSample draft={draft} valid={problem === null} />
 
       {problem && <p className="field-error">{problem}</p>}
       <p className="hint">

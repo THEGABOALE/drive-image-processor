@@ -116,7 +116,7 @@ def run(
     if "--selftest" in argv:
         return selftest(out)
 
-    print("Drive Image Processor", file=out)
+    print("DIPS · Drive Image Processing Service", file=out)
 
     if check_running(LOCAL_ORIGIN):
         print("La aplicación ya estaba abierta: se muestra en el navegador.", file=out)

@@ -79,7 +79,7 @@ def serve(app, settings, *, open_browser: bool = True, quiet: bool = False) -> N
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Drive Image Processor (web local)")
+    parser = argparse.ArgumentParser(description="DIPS · Drive Image Processing Service (web local)")
     parser.add_argument(
         "--no-browser", action="store_true", help="no abrir el navegador"
     )

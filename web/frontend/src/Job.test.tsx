@@ -951,3 +951,204 @@ describe("pasos", () => {
     expect(screen.getByRole("region", { name: "Resultado" }).className).not.toMatch(/done/);
   });
 });
+
+describe("nombre de la aplicación", () => {
+  it("se llama DIPS, Drive Image Processing Service", async () => {
+    mockApi({});
+    renderApp();
+
+    expect(await screen.findByText("DIPS")).toBeTruthy();
+    expect(screen.getByText("Drive Image Processing Service")).toBeTruthy();
+    expect(screen.queryByText("Drive Image Processor")).toBeNull();
+  });
+});
+
+describe("comparador antes y después", () => {
+  const withImages = (overrides: Partial<JobItem> = {}) =>
+    item({ status: "complete", images: { original: true, result: true }, ...overrides });
+
+  it("muestra el original y el resultado de la primera foto que los tiene", async () => {
+    mockApi({
+      current: job({
+        kind: "run",
+        summary: summary({
+          can_run: false,
+          items: [
+            item({ file_id: "sin", name: "sin.jpg", status: "failed" }),
+            withImages({ file_id: "f1", name: "uno.jpg" }),
+          ],
+        }),
+      }),
+    });
+    renderApp();
+
+    const original = (await screen.findByAltText("Original de uno.jpg")) as HTMLImageElement;
+    const result = screen.getByAltText("Resultado de uno.jpg") as HTMLImageElement;
+    expect(original.getAttribute("src")).toMatch(/^\/api\/jobs\/current\/images\/f1\/original/);
+    expect(result.getAttribute("src")).toMatch(/^\/api\/jobs\/current\/images\/f1\/result/);
+  });
+
+  it("la línea se mueve con el control, también con el teclado", async () => {
+    mockApi({
+      current: job({ kind: "run", summary: summary({ can_run: false, items: [withImages()] }) }),
+    });
+    renderApp();
+
+    const range = (await screen.findByRole("slider", {
+      name: /comparar original y resultado de foto1\.jpg/i,
+    })) as HTMLInputElement;
+    expect(range.value).toBe("50");
+
+    fireEvent.change(range, { target: { value: "20" } });
+
+    const figure = range.closest("figure")!;
+    expect(figure.style.getPropertyValue("--pos")).toBe("20%");
+  });
+
+  it("se puede elegir qué foto comparar", async () => {
+    mockApi({
+      current: job({
+        kind: "run",
+        summary: summary({
+          can_run: false,
+          items: [
+            withImages({ file_id: "f1", name: "uno.jpg" }),
+            withImages({ file_id: "f2", name: "dos.jpg" }),
+          ],
+        }),
+      }),
+    });
+    renderApp();
+
+    await screen.findByAltText("Original de uno.jpg");
+    const buttons = screen.getAllByRole("button", { name: "Comparar" });
+    fireEvent.click(buttons[1]);
+
+    expect(await screen.findByAltText("Original de dos.jpg")).toBeTruthy();
+    expect(screen.queryByAltText("Original de uno.jpg")).toBeNull();
+    expect(buttons[1].getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("sin imágenes locales no hay comparador", async () => {
+    mockApi({ current: job() });
+    renderApp();
+
+    await screen.findByText("foto1.jpg");
+    expect(screen.queryByRole("slider")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Comparar" })).toBeNull();
+  });
+});
+
+describe("lienzo de ejemplo", () => {
+  it("muestra cómo queda el lienzo con las opciones elegidas", async () => {
+    mockApi({});
+    renderApp();
+
+    const image = (await screen.findByAltText(/ejemplo de resultado de 400 × 400/i)) as HTMLImageElement;
+    expect(image.getAttribute("src")).toBe("/api/sample?width=400&height=400&background=white");
+  });
+
+  it("se actualiza al cambiar el tamaño y el fondo", async () => {
+    mockApi({});
+    renderApp();
+    await screen.findByAltText(/ejemplo de resultado/i);
+
+    fireEvent.change(screen.getByLabelText(/ancho/i), { target: { value: "800" } });
+    fireEvent.click(screen.getByLabelText(/transparente/i));
+
+    const image = (await screen.findByAltText(
+      /ejemplo de resultado de 800 × 400 px, fondo transparente/i,
+    )) as HTMLImageElement;
+    expect(image.getAttribute("src")).toBe(
+      "/api/sample?width=800&height=400&background=transparent",
+    );
+  });
+
+  it("con medidas inválidas no pide un ejemplo", async () => {
+    mockApi({});
+    renderApp();
+    await screen.findByAltText(/ejemplo de resultado/i);
+
+    fireEvent.change(screen.getByLabelText(/ancho/i), { target: { value: "10" } });
+
+    await waitFor(() => expect(screen.queryByAltText(/ejemplo de resultado/i)).toBeNull());
+  });
+
+  it("sin fotos todavía, muestra un producto de muestra y lo explica", async () => {
+    mockApi({});
+    renderApp();
+
+    const image = await screen.findByAltText(/ejemplo de resultado/i);
+    fireEvent.error(image);
+
+    expect(await screen.findByText(/cuando tenga fotos procesadas/i)).toBeTruthy();
+  });
+});
+
+describe("panel lateral", () => {
+  afterEach(() => localStorage.clear());
+
+  const handle = () =>
+    screen.getByRole("separator", { name: /redimensionar el panel lateral/i });
+
+  it("se ensancha y se angosta con las flechas, dentro de sus límites", async () => {
+    mockApi({});
+    renderApp();
+    await screen.findByLabelText(/ancho/i);
+
+    expect(handle().getAttribute("aria-valuenow")).toBe("400");
+    fireEvent.keyDown(handle(), { key: "ArrowRight" });
+    expect(handle().getAttribute("aria-valuenow")).toBe("416");
+    fireEvent.keyDown(handle(), { key: "End" });
+    expect(handle().getAttribute("aria-valuenow")).toBe("600");
+    fireEvent.keyDown(handle(), { key: "ArrowRight" });
+    expect(handle().getAttribute("aria-valuenow")).toBe("600");
+    fireEvent.keyDown(handle(), { key: "Home" });
+    expect(handle().getAttribute("aria-valuenow")).toBe("300");
+  });
+
+  it("recuerda el ancho elegido", async () => {
+    mockApi({});
+    renderApp();
+    await screen.findByLabelText(/ancho/i);
+    fireEvent.keyDown(handle(), { key: "ArrowLeft" });
+    cleanup();
+
+    mockApi({});
+    renderApp();
+    await screen.findByLabelText(/ancho/i);
+
+    expect(handle().getAttribute("aria-valuenow")).toBe("384");
+  });
+
+  it("un valor guardado fuera de rango se corrige", async () => {
+    localStorage.setItem("dips.rail-width", "5000");
+    mockApi({});
+    renderApp();
+    await screen.findByLabelText(/ancho/i);
+
+    expect(handle().getAttribute("aria-valuenow")).toBe("600");
+  });
+
+  it("doble clic vuelve al ancho predeterminado", async () => {
+    mockApi({});
+    renderApp();
+    await screen.findByLabelText(/ancho/i);
+    fireEvent.keyDown(handle(), { key: "End" });
+
+    fireEvent.doubleClick(handle());
+
+    expect(handle().getAttribute("aria-valuenow")).toBe("400");
+  });
+});
+
+describe("textos de la interfaz", () => {
+  it("ningún texto de la interfaz es editable", async () => {
+    mockApi({});
+    renderApp();
+
+    await screen.findByRole("heading", { name: "Carpetas" });
+    expect(document.querySelector("[contenteditable]")).toBeNull();
+  });
+});
+

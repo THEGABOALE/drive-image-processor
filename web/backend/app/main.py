@@ -10,9 +10,9 @@ token CSRF de esta ejecución, que solo una página del mismo origen puede leer.
 import logging
 import secrets
 
-from fastapi import FastAPI, Path, Request
+from fastapi import FastAPI, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from image_processor.google_drive import queries
 from image_processor.processing import (
@@ -30,7 +30,9 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 from .connection import AlreadyConnectedError, ConnectionManager, NotConnectedError
 from .errors import RECONNECT_REQUIRED, describe_error
 from .folders import verify_folders
-from .jobs import JobInProgressError, JobManager, PreviewNotUsableError
+from .images import SampleSource, thumbnail
+from .images import ImageNotAvailable as SampleNotAvailable
+from .jobs import ImageNotAvailable, JobInProgressError, JobManager, PreviewNotUsableError
 
 
 logger = logging.getLogger(__name__)
@@ -90,13 +92,28 @@ def _status_json(manager: ConnectionManager) -> dict:
 
 
 _NOT_CONNECTED = 401, "not_connected", "No hay una cuenta conectada."
+_NO_IMAGE = 404, "image_not_available", "Esa imagen no está en este equipo."
+
+
+def _public(job: dict | None) -> dict | None:
+    """El trabajo sin los nombres de los archivos locales."""
+
+    if job is None:
+        return None
+    return {key: value for key, value in job.items() if key != "files"}
 _JOB_IN_PROGRESS = (
     409, "job_in_progress", "Hay un trabajo en curso. Espere a que termine."
 )
 
 
-def create_app(settings, manager: ConnectionManager, jobs: JobManager | None = None) -> FastAPI:
+def create_app(
+    settings,
+    manager: ConnectionManager,
+    jobs: JobManager | None = None,
+    samples: SampleSource | None = None,
+) -> FastAPI:
     jobs = jobs or JobManager(settings, manager)
+    samples = samples or SampleSource()
     app = FastAPI(
         title="Drive Image Processor", docs_url=None, redoc_url=None, openapi_url=None
     )
@@ -237,7 +254,71 @@ def create_app(settings, manager: ConnectionManager, jobs: JobManager | None = N
     @app.get("/api/jobs/current")
     def current_job():
         account = manager.status().account
-        return {"job": jobs.current(account.sub if account else None)}
+        return {"job": _public(jobs.current(account.sub if account else None))}
+
+    def _connected_sub() -> str | None:
+        status_ = manager.status()
+        if status_.state.value != "connected" or status_.account is None:
+            return None
+        return status_.account.sub
+
+    @app.get("/api/jobs/current/images/{file_id}/{kind}")
+    def job_image(
+        file_id: str, kind: str = Path(pattern="^(original|result)$"), aligned: bool = False
+    ):
+        sub = _connected_sub()
+
+        if sub is None:
+            return _error(*_NOT_CONNECTED)
+
+        try:
+            queries.validate_file_id(file_id)
+            path = jobs.local_image(sub, file_id, kind)
+        except (ValueError, ImageNotAvailable):
+            return _error(*_NO_IMAGE)
+
+        if aligned and kind == "original":
+            try:
+                result = jobs.local_image(sub, file_id, "result")
+                content = samples.aligned(path, result, jobs.account_dir(sub) / "compare")
+                return Response(content, media_type="image/jpeg")
+            except Exception as exc:
+                # Sin alinear, el comparador sigue funcionando.
+                logger.info("Original sin alinear (%s).", type(exc).__name__)
+
+        try:
+            content, media_type = thumbnail(path, lossless=kind == "result")
+        except SampleNotAvailable:
+            return _error(*_NO_IMAGE)
+
+        return Response(content, media_type=media_type)
+
+    @app.get("/api/sample")
+    def sample(width: int, height: int, background: str = Query(max_length=32)):
+        sub = _connected_sub()
+
+        if sub is None:
+            return _error(*_NOT_CONNECTED)
+
+        try:
+            options = OutputOptions(width=width, height=height, background=background)
+        except ValueError as exc:
+            return _error(422, "invalid_options", str(exc))
+
+        try:
+            content = samples.render(samples.cutout(jobs.account_dir(sub)), options)
+        except SampleNotAvailable:
+            return _error(
+                404, "no_sample",
+                "Todavía no hay fotos procesadas o descargadas para mostrar un ejemplo.",
+            )
+        except Exception as exc:
+            info = describe_error(exc)
+            if info is None:
+                raise
+            return _error(info.status, info.code, info.message)
+
+        return Response(content, media_type="image/png")
 
     @app.post("/api/jobs/preview")
     def start_preview(request: PreviewRequest):
@@ -252,7 +333,7 @@ def create_app(settings, manager: ConnectionManager, jobs: JobManager | None = N
             return _error(422, "invalid_options", str(exc))
 
         try:
-            return jobs.start_preview(request.source_id, request.target_id, options)
+            return _public(jobs.start_preview(request.source_id, request.target_id, options))
         except NotConnectedError:
             return _error(*_NOT_CONNECTED)
         except JobInProgressError:
@@ -262,7 +343,7 @@ def create_app(settings, manager: ConnectionManager, jobs: JobManager | None = N
     def start_run(preview_id: str = Path(pattern="^[0-9a-f]{32}$")):
         # Las carpetas salen de la vista previa, nunca de esta solicitud.
         try:
-            return jobs.start_run(preview_id)
+            return _public(jobs.start_run(preview_id))
         except NotConnectedError:
             return _error(*_NOT_CONNECTED)
         except JobInProgressError:

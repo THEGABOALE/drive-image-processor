@@ -71,6 +71,8 @@ body,
 
 body {
   margin: 0;
+  cursor: default;
+  user-select: none;
   background: var(--bg);
   color: var(--ink);
   font: 400 1rem/1.5 var(--font);
@@ -88,6 +90,30 @@ h3 {
 p {
   margin: 0;
   text-wrap: pretty;
+}
+
+/* Lo que conviene poder copiar sigue seleccionable. */
+.item-name,
+.item-detail,
+.alert,
+.folder-name,
+.account-name,
+.job-folders,
+input {
+  user-select: text;
+}
+
+.item-name,
+.item-detail,
+.alert,
+.folder-name,
+.job-folders {
+  cursor: text;
+}
+
+body.resizing,
+body.resizing * {
+  cursor: col-resize !important;
 }
 
 .visually-hidden {
@@ -116,51 +142,28 @@ p {
   background-size: 24px 24px;
 }
 
-/* Marca y barra superior -------------------------------------------------- */
-
-.topbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem 1rem;
-}
+/* Marca ---------------------------------------------------------------- */
 
 .brand {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  font-size: 1.05rem;
-  font-weight: 700;
-  letter-spacing: -0.01em;
+  display: grid;
+  gap: 0.1rem;
 }
 
-/* Un lienzo con su damero y el producto recortado encima. */
-.mark {
-  position: relative;
-  width: 1.7rem;
-  height: 1.7rem;
-  border-radius: 6px;
-  background-color: var(--check-b);
-  background-image:
-    linear-gradient(45deg, var(--check-a) 25%, transparent 25% 75%, var(--check-a) 75%),
-    linear-gradient(45deg, var(--check-a) 25%, transparent 25% 75%, var(--check-a) 75%);
-  background-position:
-    0 0,
-    4px 4px;
-  background-size: 8px 8px;
-  box-shadow: inset 0 0 0 1px var(--line-strong);
+.brand-acronym {
+  font-size: 1.35rem;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.02em;
 }
 
-.mark::after {
-  content: "";
-  position: absolute;
-  inset: 22% 26% 18%;
-  border-radius: 45% 45% 30% 30%;
-  background: var(--accent);
+.brand-name {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 500;
 }
 
 .badge {
+  width: fit-content;
   padding: 0.15rem 0.6rem;
   border-radius: 999px;
   background: var(--accent-soft);
@@ -170,6 +173,14 @@ p {
 }
 
 /* Bienvenida (sin cuenta conectada) -------------------------------------- */
+
+.welcome-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
 
 .welcome {
   display: grid;
@@ -388,7 +399,7 @@ p {
 
 .shell {
   display: grid;
-  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  grid-template-columns: var(--rail-width) 0 minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -403,8 +414,54 @@ p {
   border-right: 1px solid var(--line);
 }
 
-.rail .topbar {
-  padding: 1rem 1.25rem;
+.rail-top {
+  padding: 1rem 1.25rem 0.9rem;
+}
+
+.rail-end {
+  position: sticky;
+  bottom: 0;
+  display: grid;
+  margin-top: auto;
+  background: var(--rail);
+}
+
+.rail-foot {
+  padding: 0.75rem 1.25rem 1rem;
+  border-top: 1px solid var(--line);
+}
+
+/* El borde entre el panel y el escenario: se arrastra. */
+.rail-handle {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  width: 12px;
+  height: 100vh;
+  margin-left: -6px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.rail-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  background: transparent;
+  transition: background-color 160ms var(--ease);
+}
+
+.rail-handle:hover::after,
+.rail-handle:focus-visible::after,
+body.resizing .rail-handle::after {
+  background: var(--accent);
+}
+
+.rail-handle:focus-visible {
+  outline: none;
 }
 
 .rail-section {
@@ -450,13 +507,9 @@ p {
 }
 
 .rail-action {
-  position: sticky;
-  bottom: 0;
   display: grid;
   gap: 0.5rem;
-  margin-top: auto;
-  padding: 1rem 1.25rem 1.25rem;
-  background: var(--rail);
+  padding: 1rem 1.25rem 1.1rem;
   border-top: 1px solid var(--line);
 }
 
@@ -579,8 +632,7 @@ p {
 
 .output {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 5.5rem;
-  gap: 0.85rem 1rem;
+  gap: 0.85rem;
 }
 
 .output > .hint,
@@ -700,37 +752,6 @@ p {
   background-size: 10px 10px;
 }
 
-.canvas-sample {
-  display: grid;
-  align-content: start;
-  justify-items: center;
-  gap: 0.35rem;
-}
-
-.canvas {
-  display: grid;
-  place-items: center;
-  width: 100%;
-  max-height: 7rem;
-  border-radius: 6px;
-  box-shadow: inset 0 0 0 1px var(--line-strong);
-  overflow: hidden;
-  transition: aspect-ratio 300ms var(--ease);
-}
-
-.canvas-product {
-  width: 34%;
-  aspect-ratio: 3 / 5;
-  max-height: 72%;
-  border-radius: 22% 22% 16% 16% / 12% 12% 8% 8%;
-  background: var(--accent);
-}
-
-.canvas-size {
-  color: var(--muted);
-  font: 500 0.75rem/1 var(--mono);
-}
-
 .field-error {
   color: var(--danger);
   font-size: 0.9rem;
@@ -750,35 +771,24 @@ p {
 
 .stage-empty {
   display: grid;
-  place-items: center;
-  width: 100%;
-  min-height: calc(100vh - 5rem);
-  border-radius: var(--radius);
-  background-color: var(--check-b);
-  background-image:
-    linear-gradient(45deg, var(--check-a) 25%, transparent 25% 75%, var(--check-a) 75%),
-    linear-gradient(45deg, var(--check-a) 25%, transparent 25% 75%, var(--check-a) 75%);
-  background-position:
-    0 0,
-    16px 16px;
-  background-size: 32px 32px;
-  box-shadow: inset 0 0 0 1px var(--line);
+  justify-items: center;
+  align-content: start;
+  gap: 1.75rem;
+  width: min(100%, 76rem);
+  padding-top: clamp(0.5rem, 4vh, 3rem);
 }
 
 .stage-empty-copy {
   display: grid;
-  gap: 0.5rem;
-  max-width: 26rem;
-  padding: 1.5rem 1.75rem;
-  border-radius: var(--radius);
-  background: var(--surface);
-  box-shadow: inset 0 0 0 1px var(--line);
+  gap: 0.4rem;
+  max-width: 34rem;
   text-align: center;
 }
 
 .stage-empty-copy h2 {
-  font-size: 1.35rem;
-  font-weight: 700;
+  font-size: clamp(1.5rem, 2.4vw, 2rem);
+  font-weight: 760;
+  letter-spacing: -0.015em;
 }
 
 .stage-empty-copy p {
@@ -1191,5 +1201,296 @@ button:disabled {
   *::after {
     animation: none !important;
     transition: none !important;
+  }
+}
+
+/* Lienzo de ejemplo -------------------------------------------------------- */
+
+.sample-canvas .canvas-product {
+  width: 30%;
+  aspect-ratio: 3 / 5;
+  max-height: 70%;
+  border-radius: 22% 22% 16% 16% / 12% 12% 8% 8%;
+  background: var(--accent);
+}
+
+.sample {
+  --sample-height: min(58vh, 36rem);
+  display: grid;
+  justify-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  margin: 0;
+}
+
+.sample-canvas {
+  display: grid;
+  place-items: center;
+  width: min(100%, calc(var(--sample-height) * var(--ratio, 1)));
+  aspect-ratio: var(--ratio, 1);
+  max-height: var(--sample-height);
+  border-radius: 6px;
+  box-shadow:
+    inset 0 0 0 1px var(--line-strong),
+    0 8px 8px -8px oklch(0 0 0 / 0.35);
+  overflow: hidden;
+  transition:
+    width 420ms var(--ease),
+    aspect-ratio 420ms var(--ease);
+}
+
+.sample-canvas img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transition:
+    opacity 260ms var(--ease),
+    filter 260ms var(--ease);
+}
+
+.sample-canvas img.loading {
+  opacity: 0.35;
+  filter: blur(6px);
+}
+
+.sample figcaption {
+  display: flex;
+  gap: 0.6rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.sample-size {
+  color: var(--ink);
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+/* Comparador antes/después ------------------------------------------------- */
+
+.compare {
+  --pos: 50%;
+  display: grid;
+  justify-items: center;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.compare-frame {
+  position: relative;
+  width: min(100%, calc(min(62vh, 40rem) * var(--ratio, 1)));
+  aspect-ratio: var(--ratio, 1);
+  max-height: min(62vh, 40rem);
+  border-radius: 8px;
+  background: oklch(1 0 0);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  overflow: hidden;
+}
+
+.compare-layer {
+  position: absolute;
+  inset: 0;
+}
+
+.compare-layer img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* El original llega con el encuadre del resultado: el producto coincide. */
+.compare-original {
+  background: var(--rail);
+  clip-path: inset(0 calc(100% - var(--pos)) 0 0);
+}
+
+.compare-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--pos);
+  width: 2px;
+  margin-left: -1px;
+  background: oklch(1 0 0);
+  box-shadow: 0 0 0 1px oklch(0 0 0 / 0.25);
+  pointer-events: none;
+}
+
+.compare-line::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: 999px;
+  background:
+    linear-gradient(to right, transparent 46%, oklch(0.4 0.02 175) 46% 54%, transparent 54%) center / 60% 1.5px no-repeat,
+    oklch(1 0 0);
+  box-shadow: 0 4px 8px -4px oklch(0 0 0 / 0.5);
+  transform: translate(-50%, -50%);
+}
+
+.compare-frame:has(.compare-range:focus-visible) .compare-line::after {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.compare-tag {
+  position: absolute;
+  top: 0.65rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  background: oklch(0.15 0.01 175 / 0.72);
+  color: oklch(0.98 0 0);
+  font-size: 0.78rem;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.compare-tag-left {
+  left: 0.65rem;
+}
+
+.compare-tag-right {
+  right: 0.65rem;
+}
+
+/* El control es todo el marco: se arrastra en cualquier punto. */
+.compare-range {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: ew-resize;
+}
+
+.compare figcaption {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* Filas con comparador */
+
+.item-side {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.item.selected {
+  background: var(--accent-soft);
+}
+
+button.ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--accent-text);
+}
+
+button.ghost[aria-pressed="true"] {
+  border-color: var(--accent);
+}
+
+/* Progreso con movimiento -------------------------------------------------- */
+
+.bar {
+  position: relative;
+  height: 0.65rem;
+}
+
+.bar span {
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 0 14px -2px var(--accent);
+}
+
+/* Un brillo que recorre la parte avanzada. */
+.bar span::after,
+.progress .active .track span::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 0%,
+    oklch(1 0 0 / 0.45) 45%,
+    transparent 70%
+  );
+  transform: translateX(-100%);
+  animation: sheen 1.8s var(--ease) infinite;
+}
+
+.bar-value {
+  display: inline-block;
+  transition: color 300ms var(--ease);
+}
+
+.progress li {
+  transition:
+    box-shadow 300ms var(--ease),
+    transform 300ms var(--ease);
+}
+
+.progress .active {
+  animation: breathe 2.2s ease-in-out infinite;
+}
+
+.progress .finished > span:first-child::after {
+  content: " ✓";
+  color: var(--accent-text);
+}
+
+.track span {
+  position: relative;
+  overflow: hidden;
+}
+
+.current {
+  animation: arrive 360ms var(--ease) both;
+}
+
+@keyframes sheen {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 1.5px var(--accent);
+  }
+
+  50% {
+    box-shadow:
+      inset 0 0 0 1.5px var(--accent),
+      0 0 18px -6px var(--accent);
+  }
+}
+
+@keyframes arrive {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@media (max-width: 60rem) {
+  .rail-handle {
+    display: none;
+  }
+
+  .shell {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .rail-end {
+    position: static;
   }
 }

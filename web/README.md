@@ -1,4 +1,4 @@
-# Aplicación web local
+# DIPS · Drive Image Processing Service (aplicación web local)
 
 Interfaz local para Windows sobre el motor de `image_processor`, que se usa
 como biblioteca y no cambia. Se abre en el navegador y escucha solo en

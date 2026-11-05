@@ -77,6 +77,10 @@ class JobInProgressError(Exception):
     """Ya hay un trabajo en curso."""
 
 
+class ImageNotAvailable(Exception):
+    """El último trabajo no tiene esa imagen en este equipo."""
+
+
 class PreviewNotUsableError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -97,6 +101,18 @@ def folder_dirs(settings, sub: str, source_id: str) -> tuple[Path, Path]:
 
     root = _account_dir(settings, sub) / "folders" / _short_hash(source_id)
     return root / "downloads", root / "outputs"
+
+
+def _local_files(summary) -> dict:
+    """Los nombres locales que el motor usó para cada original del plan."""
+
+    return {
+        item.file_id: {
+            "original": item.revision.local_name if item.revision else None,
+            "result": item.result.output_name if item.result else None,
+        }
+        for item in summary.plan
+    }
 
 
 def _can_run(kind: str, stopped, counts: dict) -> bool:
@@ -296,12 +312,13 @@ class JobManager:
                 on_event=lambda stage, *details: self._on_event(job, stage, details),
             )
             result = self._summary_json(job["kind"], summary)
+            files = _local_files(summary)
 
         except Exception as exc:
             self._finish(sub, job, FAILED, error=self._error_json(exc))
 
         else:
-            self._finish(sub, job, FINISHED, summary=result)
+            self._finish(sub, job, FINISHED, summary=result, files=files)
 
     def _on_event(self, job: dict, stage: str, details: tuple) -> None:
         if stage == sync.DOWNLOAD:
@@ -362,6 +379,11 @@ class JobManager:
                         {"kind": related.kind, "name": related.name}
                         for related in item.related
                     ],
+                    # Si hay copias locales para el comparador de la pantalla.
+                    "images": {
+                        "original": item.revision is not None,
+                        "result": item.result is not None,
+                    },
                 }
                 for item in summary.plan
             ],
@@ -380,15 +402,52 @@ class JobManager:
 
         return {"code": info.code, "message": info.message}
 
-    def _finish(self, sub: str, job: dict, status: str, *, summary=None, error=None) -> None:
+    def _finish(
+        self, sub: str, job: dict, status: str, *, summary=None, error=None, files=None
+    ) -> None:
         with self._lock:
             job["status"] = status
             job["summary"] = summary
             job["error"] = error
+            job["files"] = files or {}
             job["finished_at"] = self._now()
             job["progress"]["current"] = None
             self._active = False
             self._save(sub, job)
+
+    # Imágenes -----------------------------------------------------------------
+
+    def local_image(self, sub: str | None, file_id: str, kind: str) -> Path:
+        """
+        La copia local de un original o de un resultado del último trabajo.
+        Solo nombres que el motor informó para ese trabajo, dentro de sus
+        carpetas.
+        """
+        if not sub:
+            raise NotConnectedError()
+
+        with self._lock:
+            if self._sub != sub and self._active:
+                raise ImageNotAvailable()
+            self._load(sub)
+            job = self._job
+            name = ((job or {}).get("files") or {}).get(file_id, {}).get(kind)
+            source_id = job and job["source"]["id"]
+
+        if not name or name != Path(name).name or name.startswith(".") or "\\" in name:
+            raise ImageNotAvailable()
+
+        downloads_dir, output_dir = folder_dirs(self._settings, sub, source_id)
+        base = downloads_dir if kind == "original" else output_dir
+        path = base / name
+
+        if path.resolve().parent != base.resolve() or not path.is_file():
+            raise ImageNotAvailable()
+
+        return path
+
+    def account_dir(self, sub: str) -> Path:
+        return _account_dir(self._settings, sub)
 
     # Persistencia -------------------------------------------------------------
 

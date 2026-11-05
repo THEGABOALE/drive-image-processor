@@ -21,6 +21,7 @@ import {
   type PickerConfig,
 } from "./google/picker";
 import JobPanel from "./Job";
+import SampleCanvas from "./Sample";
 import OutputForm, { draftFrom, optionsFrom, outputProblem, type OutputDraft } from "./Output";
 import "./styles.css";
 
@@ -55,6 +56,7 @@ export default function App({
   const [pickerReady, setPickerReady] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
   const [output, setOutput] = useState<OutputDraft | null>(null);
+  const [railWidth, setRailWidth] = useState(storedRailWidth);
   const picker = useRef<PickerLike | null>(null);
   const apis = useRef<Promise<void> | null>(null);
 
@@ -219,7 +221,10 @@ export default function App({
   if (!connected) {
     return (
       <div className="welcome">
-        <TopBar development={development} />
+        <header className="welcome-top">
+          <Brand />
+          {development && <DevBadge />}
+        </header>
 
         <main className="welcome-body">
           <section className="welcome-copy" aria-labelledby="account-title">
@@ -285,9 +290,11 @@ export default function App({
   const canPreview = Boolean(verification) && !jobRunning;
 
   return (
-    <div className="shell">
+    <div className="shell" style={{ ["--rail-width" as string]: `${railWidth}px` }}>
       <aside className="rail">
-        <TopBar development={development} />
+        <header className="rail-top">
+          <Brand />
+        </header>
 
         <Section title="Cuenta de Google Drive" done compact>
           <div className="account">
@@ -368,19 +375,30 @@ export default function App({
           )}
         </Section>
 
-        {canPreview && (
-          <div className="rail-action">
-            <button
-              className="primary large"
-              onClick={preview}
-              disabled={busy || Boolean(problem_) || !output}
-            >
-              Ver vista previa
-            </button>
-            {!job && <p className="hint">Nada se modifica hasta que confirme el procesamiento.</p>}
-          </div>
-        )}
+        <div className="rail-end">
+          {canPreview && (
+            <div className="rail-action">
+              <button
+                className="primary large"
+                onClick={preview}
+                disabled={busy || Boolean(problem_) || !output}
+              >
+                Ver vista previa
+              </button>
+              {!job && (
+                <p className="hint">Nada se modifica hasta que confirme el procesamiento.</p>
+              )}
+            </div>
+          )}
+          {development && (
+            <footer className="rail-foot">
+              <DevBadge />
+            </footer>
+          )}
+        </div>
       </aside>
+
+      <RailHandle width={railWidth} onChange={setRailWidth} />
 
       <main className="stage" aria-label="Vista previa y procesamiento">
         {alert}
@@ -396,6 +414,7 @@ export default function App({
                   : "Verifique las carpetas para ver qué se va a procesar."}
               </p>
             </div>
+            {output && !problem_ && <SampleCanvas options={optionsFrom(output)} />}
           </div>
         )}
       </main>
@@ -403,15 +422,94 @@ export default function App({
   );
 }
 
-function TopBar({ development }: { development: boolean }) {
+function Brand() {
   return (
-    <header className="topbar">
-      <div className="brand">
-        <span className="mark" aria-hidden="true" />
-        <span>Drive Image Processor</span>
-      </div>
-      {development && <span className="badge">Entorno de desarrollo</span>}
-    </header>
+    <div className="brand">
+      <span className="brand-acronym">DIPS</span>
+      <span className="brand-name">Drive Image Processing Service</span>
+    </div>
+  );
+}
+
+function DevBadge() {
+  return <span className="badge">Entorno de desarrollo</span>;
+}
+
+const RAIL_MIN = 300;
+const RAIL_MAX = 600;
+const RAIL_DEFAULT = 400;
+const RAIL_STEP = 16;
+const RAIL_KEY = "dips.rail-width";
+
+const clampRail = (value: number) => Math.min(RAIL_MAX, Math.max(RAIL_MIN, Math.round(value)));
+
+function storedRailWidth(): number {
+  try {
+    const saved = Number(localStorage.getItem(RAIL_KEY));
+    return saved ? clampRail(saved) : RAIL_DEFAULT;
+  } catch {
+    return RAIL_DEFAULT;
+  }
+}
+
+function saveRailWidth(value: number) {
+  try {
+    localStorage.setItem(RAIL_KEY, String(value));
+  } catch {
+    // Sin almacenamiento, el ancho vuelve al predeterminado al recargar.
+  }
+}
+
+/** El borde del panel: se arrastra con el mouse o se mueve con las flechas. */
+function RailHandle({ width, onChange }: { width: number; onChange: (value: number) => void }) {
+  const change = (value: number) => {
+    const next = clampRail(value);
+    onChange(next);
+    saveRailWidth(next);
+  };
+
+  return (
+    <div
+      className="rail-handle"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Redimensionar el panel lateral"
+      aria-valuemin={RAIL_MIN}
+      aria-valuemax={RAIL_MAX}
+      aria-valuenow={width}
+      tabIndex={0}
+      onPointerDown={(event) => {
+        const start = event.clientX;
+        const initial = width;
+        const target = event.currentTarget;
+        target.setPointerCapture?.(event.pointerId);
+        document.body.classList.add("resizing");
+
+        const move = (moveEvent: PointerEvent) => change(initial + moveEvent.clientX - start);
+        const stop = () => {
+          document.body.classList.remove("resizing");
+          target.removeEventListener("pointermove", move);
+          target.removeEventListener("pointerup", stop);
+          target.removeEventListener("pointercancel", stop);
+        };
+        target.addEventListener("pointermove", move);
+        target.addEventListener("pointerup", stop);
+        target.addEventListener("pointercancel", stop);
+      }}
+      onDoubleClick={() => change(RAIL_DEFAULT)}
+      onKeyDown={(event) => {
+        const keys: Record<string, number> = {
+          ArrowLeft: width - RAIL_STEP,
+          ArrowRight: width + RAIL_STEP,
+          Home: RAIL_MIN,
+          End: RAIL_MAX,
+        };
+        if (event.key in keys) {
+          event.preventDefault();
+          change(keys[event.key]);
+        }
+      }}
+    />
   );
 }
 

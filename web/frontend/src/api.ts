@@ -58,6 +58,8 @@ export type JobItem = {
   undetermined: string[];
   notes: string[];
   related: { kind: string; name: string }[];
+  // Si hay copias locales para comparar (falta en trabajos guardados antes).
+  images?: { original: boolean; result: boolean };
 };
 
 export type Job = {

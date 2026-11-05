@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import type { Job, JobItem } from "./api";
 import { describeOptions } from "./Output";
 
@@ -38,18 +39,116 @@ const NEEDS_ATTENTION: JobItem["status"][] = ["failed", "pending", "not_started"
 const imageCount = (count: number) =>
   count === 1 ? "1 imagen" : `${count} imágenes`;
 
-function ItemRow({ item, isPreview }: { item: JobItem; isPreview: boolean }) {
+const comparable = (item: JobItem) => Boolean(item.images?.original && item.images?.result);
+
+const prefersReducedMotion = () =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/** El número sube contando hasta su nuevo valor. */
+function useTweened(target: number, duration = 700): number {
+  const [value, setValue] = useState(target);
+  const from = useRef(target);
+
+  useEffect(() => {
+    const start = from.current;
+    if (start === target || prefersReducedMotion() || typeof requestAnimationFrame !== "function") {
+      from.current = target;
+      setValue(target);
+      return;
+    }
+
+    let frame = 0;
+    const began = performance.now();
+    const step = (now: number) => {
+      const t = Math.min((now - began) / duration, 1);
+      // Desaceleración exponencial: llega suave al valor final.
+      const eased = t === 1 ? 1 : 1 - 2 ** (-10 * t);
+      const current = Math.round(start + (target - start) * eased);
+      from.current = current;
+      setValue(current);
+      if (t < 1) frame = requestAnimationFrame(step);
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [target, duration]);
+
+  return value;
+}
+
+/** Original y resultado superpuestos, con una línea que se arrastra. */
+export function Compare({ job, item }: { job: Job; item: JobItem }) {
+  const [position, setPosition] = useState(50);
+  const version = job.finished_at ?? job.created_at;
+  const base = `/api/jobs/current/images/${item.file_id}`;
+  const ratio = job.options ? job.options.width / job.options.height : 1;
+  const transparent = job.options?.background === "transparent";
+
+  return (
+    <figure className="compare" style={{ ["--pos" as string]: `${position}%` }}>
+      <div className="compare-frame" style={{ ["--ratio" as string]: String(ratio) }}>
+        <div className={transparent ? "compare-layer checker" : "compare-layer"}>
+          <img src={`${base}/result?v=${version}`} alt={`Resultado de ${item.name}`} />
+        </div>
+        <div className="compare-layer compare-original">
+          <img
+            src={`${base}/original?aligned=1&v=${version}`}
+            alt={`Original de ${item.name}`}
+          />
+        </div>
+        <span className="compare-line" aria-hidden="true" />
+        <span className="compare-tag compare-tag-left" aria-hidden="true">
+          Original
+        </span>
+        <span className="compare-tag compare-tag-right" aria-hidden="true">
+          Resultado
+        </span>
+        <input
+          className="compare-range"
+          type="range"
+          min={0}
+          max={100}
+          value={position}
+          aria-label={`Comparar original y resultado de ${item.name}`}
+          onChange={(event) => setPosition(Number(event.target.value))}
+        />
+      </div>
+      <figcaption className="item-name">{item.name}</figcaption>
+    </figure>
+  );
+}
+
+function ItemRow({
+  item,
+  isPreview,
+  selected,
+  onCompare,
+}: {
+  item: JobItem;
+  isPreview: boolean;
+  selected: boolean;
+  onCompare: (item: JobItem) => void;
+}) {
   const bad = item.status === "failed" || item.status === "pending";
   const label =
     isPreview && item.status === "complete" ? "Ya está en Drive" : STATUS_LABELS[item.status];
+  const classes = ["item", bad ? "bad" : "", selected ? "selected" : ""].filter(Boolean);
 
   return (
-    <li className={bad ? "item bad" : "item"}>
+    <li className={classes.join(" ")}>
       <div className="item-head">
         <span className="item-name">{item.name}</span>
-        <span className={`item-status status-${item.status}`}>
-          {label}
-          {bad && item.stage ? ` en ${STAGE_NAMES[item.stage]}` : ""}
+        <span className="item-side">
+          <span className={`item-status status-${item.status}`}>
+            {label}
+            {bad && item.stage ? ` en ${STAGE_NAMES[item.stage]}` : ""}
+          </span>
+          {comparable(item) && (
+            <button className="small ghost" aria-pressed={selected} onClick={() => onCompare(item)}>
+              Comparar
+            </button>
+          )}
         </span>
       </div>
       {item.reason && <p className="item-detail">{item.reason}</p>}
@@ -68,11 +167,29 @@ function ItemRow({ item, isPreview }: { item: JobItem; isPreview: boolean }) {
   );
 }
 
-function Items({ items, isPreview }: { items: JobItem[]; isPreview: boolean }) {
+function Items({
+  items,
+  isPreview,
+  selectedId,
+  onCompare,
+}: {
+  items: JobItem[];
+  isPreview: boolean;
+  selectedId: string | null;
+  onCompare: (item: JobItem) => void;
+}) {
   const attention = items.filter((item) => NEEDS_ATTENTION.includes(item.status));
   const rest = items.filter((item) => !NEEDS_ATTENTION.includes(item.status));
   const rows = (list: JobItem[]) =>
-    list.map((item) => <ItemRow item={item} isPreview={isPreview} key={item.file_id} />);
+    list.map((item) => (
+      <ItemRow
+        item={item}
+        isPreview={isPreview}
+        selected={item.file_id === selectedId}
+        onCompare={onCompare}
+        key={item.file_id}
+      />
+    ));
 
   return (
     <>
@@ -103,6 +220,7 @@ function Progress({ job }: { job: Job }) {
   const { progress } = job;
   const { total } = progress;
   const percent = overallPercent(job);
+  const shown = useTweened(percent ?? 0);
   const waitingForModel =
     job.kind === "run" &&
     total !== null &&
@@ -113,7 +231,7 @@ function Progress({ job }: { job: Job }) {
   return (
     <>
       <div className="meter">
-        {percent !== null && <span className="bar-value">{percent} %</span>}
+        {percent !== null && <span className="bar-value">{shown} %</span>}
         <div
           className={percent === null ? "bar indeterminate" : "bar"}
           role="progressbar"
@@ -129,8 +247,10 @@ function Progress({ job }: { job: Job }) {
       <ul className="progress" aria-label="Progreso">
         {STAGES.map(({ key, label }) => {
           const { done, failed } = progress[key];
+          const finished = total !== null && total > 0 && done >= total;
+          const state = progress.stage === key ? "active" : finished ? "finished" : undefined;
           return (
-            <li key={key} className={progress.stage === key ? "active" : undefined}>
+            <li key={key} className={state}>
               <span>{label}</span>
               <span className="numbers">
                 {total === null ? done : `${done} de ${total}`}
@@ -143,7 +263,11 @@ function Progress({ job }: { job: Job }) {
           );
         })}
       </ul>
-      {progress.current && <p className="hint">Última imagen: {progress.current}</p>}
+      {progress.current && (
+        <p className="hint current" key={progress.current}>
+          Última imagen: {progress.current}
+        </p>
+      )}
       {waitingForModel && (
         <p className="hint">
           Preparando el modelo de IA. La primera vez se descarga y puede tardar varios minutos.
@@ -167,6 +291,10 @@ function Summary({ job, busy, onRun }: { job: Job; busy: boolean; onRun: () => v
     : summary.complete
       ? "Listo: todo quedó en Drive"
       : "Terminó, pero hay imágenes para revisar";
+
+  const first = summary.items.find(comparable) ?? null;
+  const [selectedId, setSelectedId] = useState<string | null>(first?.file_id ?? null);
+  const selected = summary.items.find((item) => item.file_id === selectedId && comparable(item));
 
   return (
     <>
@@ -209,7 +337,16 @@ function Summary({ job, busy, onRun }: { job: Job; busy: boolean; onRun: () => v
         </p>
       )}
 
-      {summary.items.length > 0 && <Items items={summary.items} isPreview={isPreview} />}
+      {selected && <Compare job={job} item={selected} key={selected.file_id} />}
+
+      {summary.items.length > 0 && (
+        <Items
+          items={summary.items}
+          isPreview={isPreview}
+          selectedId={selected?.file_id ?? null}
+          onCompare={(item) => setSelectedId(item.file_id)}
+        />
+      )}
 
       {summary.warnings.map((warning) => (
         <p className="hint" key={warning}>
@@ -271,7 +408,7 @@ export default function JobPanel({
 
       {job.status === "running" && <Progress job={job} />}
       {job.status === "finished" && job.summary && (
-        <Summary job={job} busy={busy} onRun={onRun} />
+        <Summary job={job} busy={busy} onRun={onRun} key={job.id} />
       )}
       {job.error && (
         <p className="alert" role="alert">
