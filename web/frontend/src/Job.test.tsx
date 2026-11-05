@@ -900,7 +900,9 @@ describe("pasos", () => {
     mockApi({ routes: { "/api/folders/verify": verified } });
     renderApp(folders);
 
-    expect(await screen.findByText(/verifique las carpetas para ver/i)).toBeTruthy();
+    // Con la cuenta ya conectada: antes, todos los pasos están bloqueados.
+    await screen.findByRole("button", { name: /elegir carpeta de origen/i });
+    expect(screen.getByText(/verifique las carpetas para ver/i)).toBeTruthy();
     await selectAndVerify();
 
     expect(screen.queryByText(/verifique las carpetas para ver/i)).toBeNull();
@@ -935,4 +937,3 @@ describe("pasos", () => {
     expect(screen.getByRole("region", { name: "Resultado" }).className).not.toMatch(/done/);
   });
 });
-
