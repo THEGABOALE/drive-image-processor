@@ -209,98 +209,104 @@ export default function App({
 
   const connected = connection?.state === "connected";
   const accountName = connection?.account?.display_name || connection?.account?.email || "";
+  const development = status?.environment === "development";
+  const alert = (problem || connectionAlert) && (
+    <p className="alert" role="alert">
+      {problem ?? connectionAlert}
+    </p>
+  );
+
+  if (!connected) {
+    return (
+      <div className="welcome">
+        <TopBar development={development} />
+
+        <main className="welcome-body">
+          <section className="welcome-copy" aria-labelledby="account-title">
+            <h1>Fotos de producto sin fondo, directo en su Drive</h1>
+            <p className="lead">
+              La aplicación toma cada foto de una carpeta, recorta el producto, lo centra en un
+              lienzo blanco o transparente y guarda el PNG en la carpeta que usted elija. Las fotos
+              originales nunca se tocan.
+            </p>
+
+            <ol className="how">
+              <li>Conecte su cuenta de Google.</li>
+              <li>Elija la carpeta de las fotos y dónde guardar los resultados.</li>
+              <li>Revise la vista previa y confirme el procesamiento.</li>
+            </ol>
+
+            <h2 id="account-title" className="visually-hidden">
+              Cuenta de Google Drive
+            </h2>
+
+            {alert}
+
+            {!status && !problem && <p className="hint">Consultando el estado…</p>}
+
+            {connection?.state === "disconnected" && (
+              <div className="connect">
+                <button className="primary large" onClick={connect} disabled={busy}>
+                  Conectar Google Drive
+                </button>
+                <p className="hint">
+                  Google pedirá dos autorizaciones: una para leer los originales y otra para crear
+                  los resultados. Use la misma cuenta en ambas.
+                </p>
+              </div>
+            )}
+
+            {authorizing && (
+              <div className="connect waiting">
+                <span className="spinner" aria-hidden="true" />
+                <p>Complete la autorización en el navegador ({authorizing}).</p>
+                <button onClick={cancel} disabled={busy}>
+                  Cancelar
+                </button>
+              </div>
+            )}
+
+            {connection?.state === "reconnect_required" && (
+              <div className="connect">
+                <p>{connection.message ?? "La autorización ya no es válida."}</p>
+                <button className="primary large" onClick={connect} disabled={busy}>
+                  Volver a conectar
+                </button>
+              </div>
+            )}
+          </section>
+
+          <Comparison />
+        </main>
+      </div>
+    );
+  }
+
+  const canPreview = Boolean(verification) && !jobRunning;
 
   return (
-    <div className="page">
-      <header className="topbar">
-        <div className="brand">
-          <span className="mark" aria-hidden="true" />
-          <span>Drive Image Processor</span>
-        </div>
-        {status?.environment === "development" && (
-          <span className="badge">Entorno de desarrollo</span>
-        )}
-      </header>
+    <div className="shell">
+      <aside className="rail">
+        <TopBar development={development} />
 
-      <section className="hero">
-        <h1>
-          Quite el fondo de sus fotos de producto <span className="highlight">en Drive</span>
-        </h1>
-        <p className="lead">
-          Elija una carpeta de Google Drive: cada foto se recorta, se centra en un lienzo blanco o
-          transparente y se guarda como PNG en la carpeta que usted indique. Las fotos originales
-          nunca se tocan.
-        </p>
-      </section>
-
-      {(problem || connectionAlert) && (
-        <p className="alert" role="alert">
-          {problem ?? connectionAlert}
-        </p>
-      )}
-
-      <main className="steps">
-        <Step number={1} title="Cuenta de Google Drive" done={connected}>
-          {!status && !problem && <p className="hint">Consultando el estado…</p>}
-
-          {connected && (
-            <div className="account">
-              <span className="avatar" aria-hidden="true">
-                {(accountName || "?").charAt(0).toUpperCase()}
-              </span>
-              <div className="account-text">
-                <p className="account-name">
-                  {connection.account?.email ?? "Cuenta conectada"}
-                </p>
-                {connection.account?.display_name && (
-                  <p className="hint">{connection.account.display_name}</p>
-                )}
-              </div>
-              <button className="quiet" onClick={leave} disabled={busy || jobRunning}>
-                Desconectar
-              </button>
+        <Section title="Cuenta de Google Drive" done compact>
+          <div className="account">
+            <span className="avatar" aria-hidden="true">
+              {(accountName || "?").charAt(0).toUpperCase()}
+            </span>
+            <div className="account-text">
+              <p className="account-name">{connection.account?.email ?? "Cuenta conectada"}</p>
+              {connection.account?.display_name && (
+                <p className="hint">{connection.account.display_name}</p>
+              )}
             </div>
-          )}
+            <button className="small" onClick={leave} disabled={busy || jobRunning}>
+              Desconectar
+            </button>
+          </div>
+        </Section>
 
-          {authorizing && (
-            <div className="account">
-              <span className="spinner" aria-hidden="true" />
-              <p className="account-text">Complete la autorización en el navegador ({authorizing}).</p>
-              <button className="quiet" onClick={cancel} disabled={busy}>
-                Cancelar
-              </button>
-            </div>
-          )}
-
-          {connection?.state === "disconnected" && (
-            <div className="connect">
-              <button className="primary large" onClick={connect} disabled={busy}>
-                Conectar Google Drive
-              </button>
-              <p className="hint">
-                Google pedirá dos autorizaciones: una para leer los originales y otra para crear los
-                resultados. Use la misma cuenta en ambas.
-              </p>
-            </div>
-          )}
-
-          {connection?.state === "reconnect_required" && (
-            <div className="connect">
-              <p>{connection.message ?? "La autorización ya no es válida."}</p>
-              <button className="primary large" onClick={connect} disabled={busy}>
-                Volver a conectar
-              </button>
-            </div>
-          )}
-        </Step>
-
-        <Step
-          number={2}
-          title="Carpetas"
-          done={Boolean(verification)}
-          locked={!connected}
-          lockedText="Primero conecte su cuenta de Google."
-        >
+        <Section number={1} title="Carpetas" done={Boolean(verification)}>
           <label className="check">
             <input
               type="checkbox"
@@ -311,7 +317,7 @@ export default function App({
             Usar la misma carpeta como origen y destino
           </label>
 
-          <div className="route">
+          <div className="folders">
             <FolderSlot
               label="Carpeta de origen"
               action="origen"
@@ -320,45 +326,36 @@ export default function App({
               onChoose={() => choose("Elegir la carpeta de origen", setSource)}
             />
             {!sameFolder && (
-              <>
-                <span className="route-arrow" aria-hidden="true">
-                  →
-                </span>
-                <FolderSlot
-                  label="Carpeta de destino"
-                  action="destino"
-                  folder={target}
-                  busy={busy || !pickerReady || jobRunning}
-                  onChoose={() => choose("Elegir la carpeta de destino", setTarget)}
-                />
-              </>
+              <FolderSlot
+                label="Carpeta de destino"
+                action="destino"
+                folder={target}
+                busy={busy || !pickerReady || jobRunning}
+                onChoose={() => choose("Elegir la carpeta de destino", setTarget)}
+              />
             )}
           </div>
 
-          <div className="actions">
-            <button
-              className={verification ? "quiet" : "primary"}
-              onClick={verify}
-              disabled={busy || !ready || jobRunning}
-            >
-              Verificar carpetas
-            </button>
-            {verification && (
-              <p className="success" role="status">
-                {verification.same_folder
-                  ? "Verificada: misma carpeta para originales y resultados."
-                  : "Carpetas verificadas: se pueden leer los originales y crear los resultados."}
-              </p>
-            )}
-          </div>
-        </Step>
+          <button
+            className={verification ? "" : "primary"}
+            onClick={verify}
+            disabled={busy || !ready || jobRunning}
+          >
+            Verificar carpetas
+          </button>
+          {verification && (
+            <p className="success" role="status">
+              {verification.same_folder
+                ? "Verificada: misma carpeta para originales y resultados."
+                : "Carpetas verificadas: se pueden leer los originales y crear los resultados."}
+            </p>
+          )}
+        </Section>
 
-        <Step
-          number={3}
+        <Section
+          number={2}
           title="Resultado"
           done={Boolean(verification) && Boolean(output) && !problem_}
-          locked={!connected || !limits || !output}
-          lockedText="Elija el tamaño y el fondo cuando la cuenta esté conectada."
         >
           {limits && output && (
             <OutputForm
@@ -369,68 +366,103 @@ export default function App({
               onChange={changeOutput}
             />
           )}
-        </Step>
+        </Section>
 
-        <Step
-          number={4}
-          title="Vista previa y procesamiento"
-          done={job?.kind === "run" && job.status === "finished" && Boolean(job.summary?.complete)}
-          locked={!connected || (!verification && !job)}
-          lockedText="Verifique las carpetas para ver qué se va a procesar."
-        >
-          {verification && !jobRunning && (
-            <div className="actions">
-              <button
-                className={job ? "quiet" : "primary large"}
-                onClick={preview}
-                disabled={busy || Boolean(problem_) || !output}
-              >
-                Ver vista previa
-              </button>
-              {!job && (
-                <p className="hint">Nada se modifica hasta que confirme el procesamiento.</p>
-              )}
+        {canPreview && (
+          <div className="rail-action">
+            <button
+              className="primary large"
+              onClick={preview}
+              disabled={busy || Boolean(problem_) || !output}
+            >
+              Ver vista previa
+            </button>
+            {!job && <p className="hint">Nada se modifica hasta que confirme el procesamiento.</p>}
+          </div>
+        )}
+      </aside>
+
+      <main className="stage" aria-label="Vista previa y procesamiento">
+        {alert}
+        {job ? (
+          <JobPanel job={job} busy={busy} onRun={execute} />
+        ) : (
+          <div className="stage-empty">
+            <div className="stage-empty-copy">
+              <h2>{verification ? "Todo listo para la vista previa" : "Elija sus carpetas"}</h2>
+              <p>
+                {verification
+                  ? "La vista previa muestra qué fotos se van a procesar, sin cambiar nada todavía."
+                  : "Verifique las carpetas para ver qué se va a procesar."}
+              </p>
             </div>
-          )}
-
-          {job && <JobPanel job={job} busy={busy} onRun={execute} />}
-        </Step>
+          </div>
+        )}
       </main>
-
-      <footer className="footer">
-        La aplicación funciona solo en este equipo. Para salir, cierre la ventana de la aplicación.
-      </footer>
     </div>
   );
 }
 
-function Step({
+function TopBar({ development }: { development: boolean }) {
+  return (
+    <header className="topbar">
+      <div className="brand">
+        <span className="mark" aria-hidden="true" />
+        <span>Drive Image Processor</span>
+      </div>
+      {development && <span className="badge">Entorno de desarrollo</span>}
+    </header>
+  );
+}
+
+/** Antes y después: el mismo producto, con su fondo y sin él. */
+function Comparison() {
+  return (
+    <figure className="comparison" aria-label="Ejemplo: la misma foto con su fondo y sin él">
+      <div className="comparison-scene comparison-before" aria-hidden="true">
+        <span className="demo-product" />
+      </div>
+      <div className="comparison-scene comparison-after" aria-hidden="true">
+        <span className="demo-product" />
+      </div>
+      <span className="comparison-handle" aria-hidden="true" />
+      <figcaption>
+        <span>Original</span>
+        <span>Resultado</span>
+      </figcaption>
+    </figure>
+  );
+}
+
+function Section({
   number,
   title,
   done = false,
-  locked = false,
-  lockedText,
+  compact = false,
   children,
 }: {
-  number: number;
+  number?: number;
   title: string;
   done?: boolean;
-  locked?: boolean;
-  lockedText?: string;
+  compact?: boolean;
   children: React.ReactNode;
 }) {
-  const id = `step-${number}`;
-  const state = locked ? "locked" : done ? "done" : "open";
+  const id = `section-${title.replace(/\s+/g, "-").toLowerCase()}`;
 
   return (
-    <section className={`step ${state}`} aria-labelledby={id}>
-      <header className="step-head">
-        <span className="step-number" aria-hidden="true">
-          {done && !locked ? "✓" : number}
-        </span>
-        <h2 id={id}>{title}</h2>
-      </header>
-      {locked ? <p className="hint">{lockedText}</p> : <div className="step-body">{children}</div>}
+    <section
+      className={`rail-section${done ? " done" : ""}${compact ? " compact" : ""}`}
+      aria-labelledby={id}
+    >
+      <h2 id={id} className={compact ? "visually-hidden" : undefined}>
+        {number !== undefined && (
+          <span className="step-number" aria-hidden="true">
+            {done ? "✓" : number}
+          </span>
+        )}
+        {title}
+      </h2>
+      {children}
     </section>
   );
 }
@@ -451,9 +483,11 @@ function FolderSlot({
   return (
     <div className={folder ? "slot chosen" : "slot"}>
       <span className="folder-icon" aria-hidden="true" />
-      <h3>{label}</h3>
-      <p className={folder ? "folder-name" : "hint"}>{folder ? folder.name : "Sin elegir"}</p>
-      <button className="quiet" onClick={onChoose} disabled={busy}>
+      <div className="slot-text">
+        <h3>{label}</h3>
+        <p className={folder ? "folder-name" : "hint"}>{folder ? folder.name : "Sin elegir"}</p>
+      </div>
+      <button className="small" onClick={onChoose} disabled={busy}>
         {folder ? `Cambiar ${action}` : `Elegir carpeta de ${action}`}
       </button>
     </div>

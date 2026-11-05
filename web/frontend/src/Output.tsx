@@ -124,14 +124,15 @@ export default function OutputForm({
           ))}
         </fieldset>
 
-        {problem && <p className="field-error">{problem}</p>}
-        <p className="hint">
-          Si cambia el tamaño o el fondo, se crean resultados nuevos con otro nombre; los
-          anteriores no se modifican.
-        </p>
       </div>
 
       <CanvasSample draft={draft} valid={problem === null} />
+
+      {problem && <p className="field-error">{problem}</p>}
+      <p className="hint">
+        Si cambia el tamaño o el fondo, se crean resultados nuevos con otro nombre; los anteriores
+        no se modifican.
+      </p>
     </div>
   );
 }

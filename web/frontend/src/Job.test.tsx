@@ -124,8 +124,15 @@ function renderApp(results: ({ id: string; name: string } | null)[] = []) {
   return instance;
 }
 
+async function enabledButton(name: RegExp) {
+  const button = (await screen.findByRole("button", { name })) as HTMLButtonElement;
+  // Picker se habilita cuando cargan las bibliotecas de Google.
+  await waitFor(() => expect(button.disabled).toBe(false));
+  return button;
+}
+
 async function selectAndVerify() {
-  fireEvent.click(await screen.findByRole("button", { name: /elegir carpeta de origen/i }));
+  fireEvent.click(await enabledButton(/elegir carpeta de origen/i));
   await screen.findByText("Origen");
   fireEvent.click(screen.getByRole("button", { name: /elegir carpeta de destino/i }));
   await screen.findByText("Destino");
@@ -234,7 +241,7 @@ describe("vista previa", () => {
     });
     renderApp(folders);
 
-    fireEvent.click(await screen.findByRole("button", { name: /elegir carpeta de origen/i }));
+    fireEvent.click(await enabledButton(/elegir carpeta de origen/i));
     await screen.findByText("Origen");
     fireEvent.click(screen.getByRole("button", { name: /elegir carpeta de destino/i }));
     await screen.findByText("Destino");
@@ -888,12 +895,19 @@ describe("presentación del resumen y del progreso", () => {
 });
 
 describe("pasos", () => {
-  it("sin conexión, los pasos siguientes explican qué falta", async () => {
+  it("sin conexión, la bienvenida explica los pasos y no muestra controles", async () => {
     mockApi({ connection: { state: "disconnected", account: null } });
     renderApp();
 
-    expect(await screen.findByText("Primero conecte su cuenta de Google.")).toBeTruthy();
-    expect(screen.getByText(/verifique las carpetas para ver/i)).toBeTruthy();
+    await screen.findByRole("button", { name: /conectar google drive/i });
+    const steps = screen.getAllByRole("listitem").map((li) => li.textContent);
+    expect(steps).toEqual([
+      "Conecte su cuenta de Google.",
+      "Elija la carpeta de las fotos y dónde guardar los resultados.",
+      "Revise la vista previa y confirme el procesamiento.",
+    ]);
+    expect(screen.queryByLabelText(/ancho/i)).toBeNull();
+    expect(screen.queryByText(/verifique las carpetas para ver/i)).toBeNull();
   });
 
   it("la vista previa espera a que se verifiquen las carpetas", async () => {

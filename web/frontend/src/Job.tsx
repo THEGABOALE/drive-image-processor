@@ -112,7 +112,8 @@ function Progress({ job }: { job: Job }) {
 
   return (
     <>
-      <div className="bar-row">
+      <div className="meter">
+        {percent !== null && <span className="bar-value">{percent} %</span>}
         <div
           className={percent === null ? "bar indeterminate" : "bar"}
           role="progressbar"
@@ -123,7 +124,6 @@ function Progress({ job }: { job: Job }) {
         >
           <span style={{ width: percent === null ? undefined : `${percent}%` }} />
         </div>
-        {percent !== null && <span className="bar-value">{percent} %</span>}
       </div>
 
       <ul className="progress" aria-label="Progreso">
@@ -132,9 +132,12 @@ function Progress({ job }: { job: Job }) {
           return (
             <li key={key} className={progress.stage === key ? "active" : undefined}>
               <span>{label}</span>
-              <span>
+              <span className="numbers">
                 {total === null ? done : `${done} de ${total}`}
                 {failed > 0 ? ` (${failed} con errores)` : ""}
+              </span>
+              <span className="track" aria-hidden="true">
+                <span style={{ width: total ? `${Math.min(done / total, 1) * 100}%` : "0%" }} />
               </span>
             </li>
           );
@@ -252,18 +255,19 @@ export default function JobPanel({
 
   return (
     <div className="job">
-      <div className="job-head">
-        <h3>{title}</h3>
-        {job.options && <span className="tag">{describeOptions(job.options)}</span>}
-      </div>
-
-      {job.source.name && (
-        <p className="job-folders">
-          {job.same_folder
-            ? `Carpeta: ${job.source.name}`
-            : `De ${job.source.name} a ${job.target.name}`}
-        </p>
-      )}
+      <header className="job-head">
+        <h2>{title}</h2>
+        <div className="job-meta">
+          {job.source.name && (
+            <p className="job-folders">
+              {job.same_folder
+                ? `Carpeta: ${job.source.name}`
+                : `De ${job.source.name} a ${job.target.name}`}
+            </p>
+          )}
+          {job.options && <span className="tag">{describeOptions(job.options)}</span>}
+        </div>
+      </header>
 
       {job.status === "running" && <Progress job={job} />}
       {job.status === "finished" && job.summary && (

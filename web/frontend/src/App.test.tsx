@@ -74,6 +74,13 @@ function renderApp(pickerResults: (PickedFolder | null | PickerError)[] = []) {
   return picker;
 }
 
+async function enabledButton(name: RegExp) {
+  const button = (await screen.findByRole("button", { name })) as HTMLButtonElement;
+  // Picker se habilita cuando cargan las bibliotecas de Google.
+  await waitFor(() => expect(button.disabled).toBe(false));
+  return button;
+}
+
 const posts = (calls: Call[]) => calls.filter((c) => c.init?.method === "POST");
 
 afterEach(() => {
@@ -199,7 +206,7 @@ describe("conexión y desconexión", () => {
     );
     const picker = renderApp([folder("origen", "Origen")]);
 
-    fireEvent.click(await screen.findByRole("button", { name: /elegir carpeta de origen/i }));
+    fireEvent.click(await enabledButton(/elegir carpeta de origen/i));
     await screen.findByText("Origen");
 
     fireEvent.click(screen.getByRole("button", { name: /desconectar/i }));
@@ -225,7 +232,7 @@ describe("conexión y desconexión", () => {
 
 describe("selección de carpetas", () => {
   async function pickBoth(picker: ReturnType<typeof renderApp>) {
-    fireEvent.click(await screen.findByRole("button", { name: /elegir carpeta de origen/i }));
+    fireEvent.click(await enabledButton(/elegir carpeta de origen/i));
     await screen.findByText("Origen");
     fireEvent.click(screen.getByRole("button", { name: /elegir carpeta de destino/i }));
     await screen.findByText("Destino");
@@ -374,7 +381,7 @@ describe("selección de carpetas", () => {
     const { calls } = mockApi({ state: "connected", account: ACCOUNT });
     renderApp([new PickerError("account_mismatch", "Eligió otra cuenta de Google.")]);
 
-    fireEvent.click(await screen.findByRole("button", { name: /elegir carpeta de origen/i }));
+    fireEvent.click(await enabledButton(/elegir carpeta de origen/i));
 
     expect((await screen.findByRole("alert")).textContent).toMatch(/otra cuenta/i);
     expect(posts(calls)).toEqual([]);
