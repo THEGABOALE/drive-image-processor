@@ -44,6 +44,20 @@ export function describeOptions(options: OutputOptions): string {
   return `${options.width} × ${options.height} px, fondo ${background}`;
 }
 
+/** Un lienzo de muestra con la proporción y el fondo elegidos. */
+function CanvasSample({ draft, valid }: { draft: OutputDraft; valid: boolean }) {
+  const ratio = valid ? `${draft.width} / ${draft.height}` : "1 / 1";
+
+  return (
+    <div className="canvas-sample" aria-hidden="true">
+      <div className={`canvas canvas-${draft.background}`} style={{ aspectRatio: ratio }}>
+        <span className="canvas-product" />
+      </div>
+      <span className="canvas-size">{valid ? `${draft.width} × ${draft.height}` : "—"}</span>
+    </div>
+  );
+}
+
 export default function OutputForm({
   draft,
   limits,
@@ -58,41 +72,44 @@ export default function OutputForm({
   onChange: (draft: OutputDraft) => void;
 }) {
   return (
-    <section className="panel" aria-labelledby="output-title">
-      <h2 id="output-title">Resultado</h2>
-
-      <div className="output">
-        <label className="field">
-          Ancho (px)
-          <input
-            type="number"
-            inputMode="numeric"
-            min={limits.min_side}
-            max={limits.max_side}
-            step={1}
-            value={draft.width}
-            disabled={disabled}
-            onChange={(event) => onChange({ ...draft, width: event.target.value })}
-          />
-        </label>
-        <label className="field">
-          Alto (px)
-          <input
-            type="number"
-            inputMode="numeric"
-            min={limits.min_side}
-            max={limits.max_side}
-            step={1}
-            value={draft.height}
-            disabled={disabled}
-            onChange={(event) => onChange({ ...draft, height: event.target.value })}
-          />
-        </label>
+    <div className="output">
+      <div className="output-controls">
+        <div className="sizes">
+          <label className="field">
+            Ancho (px)
+            <input
+              type="number"
+              inputMode="numeric"
+              min={limits.min_side}
+              max={limits.max_side}
+              step={1}
+              value={draft.width}
+              disabled={disabled}
+              onChange={(event) => onChange({ ...draft, width: event.target.value })}
+            />
+          </label>
+          <span className="times" aria-hidden="true">
+            ×
+          </span>
+          <label className="field">
+            Alto (px)
+            <input
+              type="number"
+              inputMode="numeric"
+              min={limits.min_side}
+              max={limits.max_side}
+              step={1}
+              value={draft.height}
+              disabled={disabled}
+              onChange={(event) => onChange({ ...draft, height: event.target.value })}
+            />
+          </label>
+        </div>
 
         <fieldset className="backgrounds" disabled={disabled}>
           <legend>Fondo</legend>
           {limits.backgrounds.map((background) => (
-            <label className="check" key={background}>
+            <label className="swatch-option" key={background}>
               <input
                 type="radio"
                 name="background"
@@ -101,17 +118,20 @@ export default function OutputForm({
                 disabled={disabled}
                 onChange={() => onChange({ ...draft, background })}
               />
+              <span className={`swatch canvas-${background}`} aria-hidden="true" />
               {BACKGROUND_LABELS[background] ?? background}
             </label>
           ))}
         </fieldset>
+
+        {problem && <p className="field-error">{problem}</p>}
+        <p className="hint">
+          Si cambia el tamaño o el fondo, se crean resultados nuevos con otro nombre; los
+          anteriores no se modifican.
+        </p>
       </div>
 
-      {problem && <p className="field-error">{problem}</p>}
-      <p className="muted">
-        Si cambia el tamaño o el fondo, se crean resultados nuevos con otro nombre; los anteriores
-        no se modifican.
-      </p>
-    </section>
+      <CanvasSample draft={draft} valid={problem === null} />
+    </div>
   );
 }

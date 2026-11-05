@@ -778,3 +778,161 @@ describe("tamaño y fondo del resultado", () => {
     expect(screen.getByText(/se crean resultados nuevos/i)).toBeTruthy();
   });
 });
+
+describe("presentación del resumen y del progreso", () => {
+  it("muestra primero las imágenes con problemas", async () => {
+    mockApi({
+      current: job({
+        kind: "run",
+        summary: summary({
+          counts: { complete: 1, planned: 0, failed: 1, pending: 0, not_started: 0 },
+          complete: false,
+          can_run: false,
+          items: [
+            item({ file_id: "a", name: "bien.jpg", status: "complete" }),
+            item({ file_id: "b", name: "mal.jpg", status: "failed", reason: "dañada" }),
+          ],
+        }),
+      }),
+    });
+    renderApp();
+
+    const bad = await screen.findByText("mal.jpg");
+    const good = screen.getByText("bien.jpg");
+    expect(bad.compareDocumentPosition(good) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("agrupa muchas imágenes sin problemas y deja los errores a la vista", async () => {
+    const ok = Array.from({ length: 8 }, (_, i) =>
+      item({ file_id: `ok${i}`, name: `ok${i}.jpg`, status: "complete" }),
+    );
+    mockApi({
+      current: job({
+        kind: "run",
+        summary: summary({
+          counts: { complete: 8, planned: 0, failed: 1, pending: 0, not_started: 0 },
+          complete: false,
+          can_run: false,
+          items: [...ok, item({ file_id: "x", name: "mal.jpg", status: "failed" })],
+        }),
+      }),
+    });
+    renderApp();
+
+    const group = (await screen.findByText(/ver las 8 imágenes sin problemas/i)).closest("details")!;
+    expect(group.open).toBe(false);
+    expect(within(group).getByText("ok0.jpg")).toBeTruthy();
+    expect(group.contains(screen.getByText("mal.jpg"))).toBe(false);
+  });
+
+  it("pocas imágenes sin problemas no se agrupan", async () => {
+    mockApi({ current: job() });
+    renderApp();
+
+    await screen.findByText("foto1.jpg");
+    expect(screen.queryByText(/sin problemas/i)).toBeNull();
+  });
+
+  it("la barra muestra el avance total de las tres etapas", async () => {
+    mockApi({
+      current: job({
+        kind: "run",
+        status: "running",
+        summary: null,
+        progress: {
+          total: 4,
+          stage: "processing",
+          current: "foto2.jpg",
+          download: { done: 4, failed: 0 },
+          processing: { done: 2, failed: 0 },
+          upload: { done: 1, failed: 0 },
+        },
+      }),
+    });
+    renderApp();
+
+    const bar = await screen.findByRole("progressbar", { name: /avance total/i });
+    expect(bar.getAttribute("aria-valuenow")).toBe("58");
+    expect(screen.getByText("58 %")).toBeTruthy();
+  });
+
+  it("sin total conocido la barra no inventa un porcentaje", async () => {
+    mockApi({ current: job({ status: "running", summary: null }) });
+    renderApp();
+
+    const bar = await screen.findByRole("progressbar", { name: /avance total/i });
+    expect(bar.getAttribute("aria-valuenow")).toBeNull();
+    expect(screen.queryByText(/ %$/)).toBeNull();
+  });
+
+  it("el resumen dice si terminó bien o si hay que revisar", async () => {
+    mockApi({
+      current: job({
+        kind: "run",
+        summary: summary({ uploaded_now: 1, can_run: false, items: [item({ status: "complete" })] }),
+      }),
+    });
+    renderApp();
+    expect(await screen.findByText(/listo: todo quedó en drive/i)).toBeTruthy();
+    cleanup();
+
+    mockApi({
+      current: job({
+        kind: "run",
+        summary: summary({ complete: false, can_run: false, items: [item({ status: "failed" })] }),
+      }),
+    });
+    renderApp();
+    expect(await screen.findByText(/hay imágenes para revisar/i)).toBeTruthy();
+  });
+});
+
+describe("pasos", () => {
+  it("sin conexión, los pasos siguientes explican qué falta", async () => {
+    mockApi({ connection: { state: "disconnected", account: null } });
+    renderApp();
+
+    expect(await screen.findByText("Primero conecte su cuenta de Google.")).toBeTruthy();
+    expect(screen.getByText(/verifique las carpetas para ver/i)).toBeTruthy();
+  });
+
+  it("la vista previa espera a que se verifiquen las carpetas", async () => {
+    mockApi({ routes: { "/api/folders/verify": verified } });
+    renderApp(folders);
+
+    expect(await screen.findByText(/verifique las carpetas para ver/i)).toBeTruthy();
+    await selectAndVerify();
+
+    expect(screen.queryByText(/verifique las carpetas para ver/i)).toBeNull();
+    expect(screen.getByText(/nada se modifica hasta que confirme/i)).toBeTruthy();
+  });
+
+  it("con un trabajo guardado, el último paso se muestra sin volver a verificar", async () => {
+    mockApi({ current: job() });
+    renderApp();
+
+    expect(await screen.findByText("foto1.jpg")).toBeTruthy();
+    expect(screen.queryByText(/verifique las carpetas para ver/i)).toBeNull();
+  });
+
+  it("los pasos completos se marcan", async () => {
+    mockApi({ routes: { "/api/folders/verify": verified } });
+    renderApp(folders);
+    await selectAndVerify();
+
+    const folderStep = screen.getByRole("region", { name: "Carpetas" });
+    expect(folderStep.className).toMatch(/done/);
+    const accountStep = screen.getByRole("region", { name: "Cuenta de Google Drive" });
+    expect(accountStep.className).toMatch(/done/);
+    expect(screen.getByRole("region", { name: "Resultado" }).className).toMatch(/done/);
+  });
+
+  it("el resultado no figura como completo antes de verificar las carpetas", async () => {
+    mockApi({});
+    renderApp();
+
+    await screen.findByLabelText(/ancho/i);
+    expect(screen.getByRole("region", { name: "Resultado" }).className).not.toMatch(/done/);
+  });
+});
+
