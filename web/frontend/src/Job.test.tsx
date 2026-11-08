@@ -133,11 +133,16 @@ async function enabledButton(name: RegExp) {
 
 async function selectAndVerify() {
   fireEvent.click(await enabledButton(/elegir carpeta de origen/i));
-  await screen.findByText("Origen");
+  await screen.findAllByText("Origen");
   fireEvent.click(screen.getByRole("button", { name: /elegir carpeta de destino/i }));
-  await screen.findByText("Destino");
+  await screen.findAllByText("Destino");
   fireEvent.click(screen.getByRole("button", { name: /verificar carpetas/i }));
   await screen.findByText(/verificadas/i);
+}
+
+/** Un trabajo terminado no se muestra solo al entrar: se abre a pedido. */
+async function openLastJob() {
+  fireEvent.click(await screen.findByRole("button", { name: /ver el último trabajo/i }));
 }
 
 const verified = () => ({
@@ -212,7 +217,7 @@ describe("vista previa", () => {
 
     fireEvent.click(await screen.findByLabelText(/misma carpeta/i));
     fireEvent.click(screen.getByRole("button", { name: /elegir carpeta de origen/i }));
-    await screen.findByText("Origen");
+    await screen.findAllByText("Origen");
     fireEvent.click(screen.getByRole("button", { name: /verificar carpetas/i }));
     await screen.findByText(/misma carpeta para originales/i);
     fireEvent.click(screen.getByRole("button", { name: /ver vista previa/i }));
@@ -242,9 +247,9 @@ describe("vista previa", () => {
     renderApp(folders);
 
     fireEvent.click(await enabledButton(/elegir carpeta de origen/i));
-    await screen.findByText("Origen");
+    await screen.findAllByText("Origen");
     fireEvent.click(screen.getByRole("button", { name: /elegir carpeta de destino/i }));
-    await screen.findByText("Destino");
+    await screen.findAllByText("Destino");
     fireEvent.click(screen.getByLabelText(/misma carpeta/i));
     fireEvent.click(screen.getByRole("button", { name: /verificar carpetas/i }));
     await screen.findByText(/misma carpeta para originales/i);
@@ -271,8 +276,9 @@ describe("vista previa", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
-    expect(await screen.findByText(/es demasiado grande/)).toBeTruthy();
+    expect(await screen.findByText(/^Es demasiado grande/)).toBeTruthy();
   });
 
   it("avisa cuando no hay nada que procesar y no ofrece ejecutar", async () => {
@@ -286,6 +292,7 @@ describe("vista previa", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
     expect(await screen.findByText(/no hay nada que procesar/i)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /procesar/i })).toBeNull();
@@ -306,6 +313,7 @@ describe("vista previa", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
     expect(await screen.findByText(/no incluidos \(formato\)/)).toBeTruthy();
     expect(screen.getByText(/Se recuperó el registro/)).toBeTruthy();
@@ -322,6 +330,7 @@ describe("ejecución", () => {
       },
     });
     renderApp();
+    await openLastJob();
 
     fireEvent.click(await screen.findByRole("button", { name: /procesar 1 imagen/i }));
 
@@ -342,6 +351,7 @@ describe("ejecución", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
     expect(await screen.findByRole("button", { name: /procesar 3 imágenes/i })).toBeTruthy();
   });
@@ -444,9 +454,10 @@ describe("ejecución", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
-    expect(await screen.findByText(/imagen dañada/)).toBeTruthy();
-    expect(screen.getByText(/no se pudo confirmar/)).toBeTruthy();
+    expect(await screen.findByText(/^Imagen dañada/)).toBeTruthy();
+    expect(screen.getByText(/^No se pudo confirmar/)).toBeTruthy();
     expect(screen.getByText(/vuelva a generar la vista previa/i)).toBeTruthy();
   });
 
@@ -463,6 +474,7 @@ describe("ejecución", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
     expect(await screen.findByText("En Drive")).toBeTruthy();
     expect(screen.queryByText("Ya está en Drive")).toBeNull();
@@ -479,6 +491,7 @@ describe("ejecución", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
     expect(await screen.findByText("Ya está en Drive")).toBeTruthy();
   });
@@ -497,6 +510,7 @@ describe("ejecución", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
     expect(await screen.findByText("1 PNG subido ahora")).toBeTruthy();
     expect(screen.getByText("1 pendiente de confirmar")).toBeTruthy();
@@ -517,6 +531,7 @@ describe("ejecución", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
     expect((await screen.findByRole("alert")).textContent).toMatch(/se agotó la cuota/i);
   });
@@ -530,6 +545,7 @@ describe("ejecución", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
     expect((await screen.findByRole("alert")).textContent).toMatch(/no puede crear archivos/i);
     expect(screen.queryByRole("button", { name: /procesar/i })).toBeNull();
@@ -545,6 +561,7 @@ describe("ejecución", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
     expect((await screen.findByRole("alert")).textContent).toMatch(/se cerró la aplicación/i);
   });
@@ -560,6 +577,7 @@ describe("ejecución", () => {
       },
     });
     renderApp();
+    await openLastJob();
 
     fireEvent.click(await screen.findByRole("button", { name: /procesar 1 imagen/i }));
 
@@ -633,10 +651,11 @@ describe("relación con las carpetas", () => {
       routes: { "/api/folders/verify": verified },
     });
     renderApp([{ id: "otra", name: "Otra" }]);
+    await openLastJob();
 
     await screen.findByText("foto1.jpg");
     fireEvent.click(screen.getByRole("button", { name: /elegir carpeta de origen/i }));
-    await screen.findByText("Otra");
+    await screen.findAllByText("Otra");
 
     expect(screen.queryByText("foto1.jpg")).toBeNull();
     expect(screen.queryByRole("button", { name: /procesar/i })).toBeNull();
@@ -645,6 +664,7 @@ describe("relación con las carpetas", () => {
   it("muestra los nombres de las carpetas del trabajo", async () => {
     mockApi({ current: job() });
     renderApp();
+    await openLastJob();
 
     expect(await screen.findByText(/Originales/)).toBeTruthy();
     expect(screen.getByText(/Resultados/)).toBeTruthy();
@@ -766,6 +786,7 @@ describe("tamaño y fondo del resultado", () => {
       current: job({ options: { width: 800, height: 600, background: "transparent" } }),
     });
     renderApp();
+    await openLastJob();
 
     expect(await screen.findByText(/800 × 600 px, fondo transparente/)).toBeTruthy();
   });
@@ -775,6 +796,7 @@ describe("tamaño y fondo del resultado", () => {
     delete (old as Partial<Job>).options;
     mockApi({ current: old });
     renderApp();
+    await openLastJob();
 
     expect(await screen.findByText("foto1.jpg")).toBeTruthy();
   });
@@ -803,6 +825,7 @@ describe("presentación del resumen y del progreso", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
     const bad = await screen.findByText("mal.jpg");
     const good = screen.getByText("bien.jpg");
@@ -825,6 +848,7 @@ describe("presentación del resumen y del progreso", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
     const group = (await screen.findByText(/ver las 8 imágenes sin problemas/i)).closest("details")!;
     expect(group.open).toBe(false);
@@ -835,6 +859,7 @@ describe("presentación del resumen y del progreso", () => {
   it("pocas imágenes sin problemas no se agrupan", async () => {
     mockApi({ current: job() });
     renderApp();
+    await openLastJob();
 
     await screen.findByText("foto1.jpg");
     expect(screen.queryByText(/sin problemas/i)).toBeNull();
@@ -880,6 +905,7 @@ describe("presentación del resumen y del progreso", () => {
       }),
     });
     renderApp();
+    await openLastJob();
     expect(await screen.findByText(/listo: todo quedó en drive/i)).toBeTruthy();
     cleanup();
 
@@ -890,6 +916,7 @@ describe("presentación del resumen y del progreso", () => {
       }),
     });
     renderApp();
+    await openLastJob();
     expect(await screen.findByText(/hay imágenes para revisar/i)).toBeTruthy();
   });
 });
@@ -907,7 +934,7 @@ describe("pasos", () => {
       "Revise la vista previa y confirme el procesamiento.",
     ]);
     expect(screen.queryByLabelText(/ancho/i)).toBeNull();
-    expect(screen.queryByText(/verifique las carpetas para ver/i)).toBeNull();
+    expect(screen.queryByText(/empiece eligiendo las carpetas/i)).toBeNull();
   });
 
   it("la vista previa espera a que se verifiquen las carpetas", async () => {
@@ -916,19 +943,51 @@ describe("pasos", () => {
 
     // Con la cuenta ya conectada: antes, todos los pasos están bloqueados.
     await screen.findByRole("button", { name: /elegir carpeta de origen/i });
-    expect(screen.getByText(/verifique las carpetas para ver/i)).toBeTruthy();
+    expect(screen.getByText(/empiece eligiendo las carpetas/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /ver vista previa/i })).toBeNull();
     await selectAndVerify();
 
-    expect(screen.queryByText(/verifique las carpetas para ver/i)).toBeNull();
+    expect(screen.queryByText(/empiece eligiendo las carpetas/i)).toBeNull();
     expect(screen.getByText(/nada se modifica hasta que confirme/i)).toBeTruthy();
   });
 
-  it("con un trabajo guardado, el último paso se muestra sin volver a verificar", async () => {
+  it("con un trabajo guardado, el último paso se abre sin volver a verificar", async () => {
     mockApi({ current: job() });
     renderApp();
+    await openLastJob();
 
     expect(await screen.findByText("foto1.jpg")).toBeTruthy();
-    expect(screen.queryByText(/verifique las carpetas para ver/i)).toBeNull();
+    expect(screen.getByRole("button", { name: /procesar 1 imagen/i })).toBeTruthy();
+  });
+
+  it("el resultado se habilita después de verificar las carpetas", async () => {
+    mockApi({ routes: { "/api/folders/verify": verified } });
+    renderApp(folders);
+
+    const width = (await screen.findByLabelText(/ancho/i)) as HTMLInputElement;
+    const step = screen.getByRole("region", { name: "Resultado" });
+    expect(width.disabled).toBe(true);
+    expect((screen.getByLabelText(/transparente/i) as HTMLInputElement).disabled).toBe(true);
+    expect(step.className).toMatch(/locked/);
+    expect(within(step).getByText(/disponible después de verificar las carpetas/i)).toBeTruthy();
+
+    await selectAndVerify();
+
+    expect((screen.getByLabelText(/ancho/i) as HTMLInputElement).disabled).toBe(false);
+    expect(screen.getByRole("region", { name: "Resultado" }).className).not.toMatch(/locked/);
+    expect(screen.queryByText(/disponible después de verificar las carpetas/i)).toBeNull();
+  });
+
+  it("con la misma carpeta, el lugar indica que es origen y destino", async () => {
+    mockApi({});
+    renderApp();
+
+    await screen.findByRole("heading", { name: "Carpeta de origen" });
+    fireEvent.click(screen.getByLabelText(/misma carpeta/i));
+
+    expect(screen.getByRole("heading", { name: "Carpeta (origen y destino)" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Carpeta de origen" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Elegir carpeta de origen y destino" })).toBeTruthy();
   });
 
   it("los pasos completos se marcan", async () => {
@@ -981,6 +1040,7 @@ describe("comparador antes y después", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
     const original = (await screen.findByAltText("Original de uno.jpg")) as HTMLImageElement;
     const result = screen.getByAltText("Resultado de uno.jpg") as HTMLImageElement;
@@ -993,6 +1053,7 @@ describe("comparador antes y después", () => {
       current: job({ kind: "run", summary: summary({ can_run: false, items: [withImages()] }) }),
     });
     renderApp();
+    await openLastJob();
 
     const range = (await screen.findByRole("slider", {
       name: /comparar original y resultado de foto1\.jpg/i,
@@ -1019,6 +1080,7 @@ describe("comparador antes y después", () => {
       }),
     });
     renderApp();
+    await openLastJob();
 
     await screen.findByAltText("Original de uno.jpg");
     const buttons = screen.getAllByRole("button", { name: "Comparar" });
@@ -1032,6 +1094,7 @@ describe("comparador antes y después", () => {
   it("sin imágenes locales no hay comparador", async () => {
     mockApi({ current: job() });
     renderApp();
+    await openLastJob();
 
     await screen.findByText("foto1.jpg");
     expect(screen.queryByRole("slider")).toBeNull();
@@ -1041,16 +1104,18 @@ describe("comparador antes y después", () => {
 
 describe("lienzo de ejemplo", () => {
   it("muestra cómo queda el lienzo con las opciones elegidas", async () => {
-    mockApi({});
-    renderApp();
+    mockApi({ routes: { "/api/folders/verify": verified } });
+    renderApp(folders);
+    await selectAndVerify();
 
     const image = (await screen.findByAltText(/ejemplo de resultado de 400 × 400/i)) as HTMLImageElement;
     expect(image.getAttribute("src")).toBe("/api/sample?width=400&height=400&background=white");
   });
 
   it("se actualiza al cambiar el tamaño y el fondo", async () => {
-    mockApi({});
-    renderApp();
+    mockApi({ routes: { "/api/folders/verify": verified } });
+    renderApp(folders);
+    await selectAndVerify();
     await screen.findByAltText(/ejemplo de resultado/i);
 
     fireEvent.change(screen.getByLabelText(/ancho/i), { target: { value: "800" } });
@@ -1065,8 +1130,9 @@ describe("lienzo de ejemplo", () => {
   });
 
   it("con medidas inválidas no pide un ejemplo", async () => {
-    mockApi({});
-    renderApp();
+    mockApi({ routes: { "/api/folders/verify": verified } });
+    renderApp(folders);
+    await selectAndVerify();
     await screen.findByAltText(/ejemplo de resultado/i);
 
     fireEvent.change(screen.getByLabelText(/ancho/i), { target: { value: "10" } });
@@ -1075,8 +1141,9 @@ describe("lienzo de ejemplo", () => {
   });
 
   it("sin fotos todavía, muestra un producto de muestra y lo explica", async () => {
-    mockApi({});
-    renderApp();
+    mockApi({ routes: { "/api/folders/verify": verified } });
+    renderApp(folders);
+    await selectAndVerify();
 
     const image = await screen.findByAltText(/ejemplo de resultado/i);
     fireEvent.error(image);
@@ -1149,5 +1216,189 @@ describe("textos de la interfaz", () => {
 
     await screen.findByRole("heading", { name: "Carpetas" });
     expect(document.querySelector("[contenteditable]")).toBeNull();
+  });
+});
+
+describe("inicio", () => {
+  it("al entrar no muestra un trabajo terminado: invita a elegir las carpetas", async () => {
+    mockApi({ current: job() });
+    renderApp();
+
+    expect(await screen.findByRole("heading", { name: /empiece eligiendo las carpetas/i })).toBeTruthy();
+    expect(screen.queryByText("foto1.jpg")).toBeNull();
+    expect(screen.queryByRole("button", { name: /procesar/i })).toBeNull();
+
+    const last = screen.getByRole("region", { name: /último trabajo/i });
+    expect(last.textContent).toMatch(/Originales/);
+    expect(last.textContent).toMatch(/Resultados/);
+    expect(last.textContent).toMatch(/1 por procesar/);
+  });
+
+  it("el último trabajo se abre a pedido y se puede cerrar", async () => {
+    mockApi({ current: job() });
+    renderApp();
+
+    await openLastJob();
+    expect(await screen.findByText("foto1.jpg")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /cerrar/i }));
+
+    expect(await screen.findByRole("heading", { name: /empiece eligiendo las carpetas/i })).toBeTruthy();
+    expect(screen.queryByText("foto1.jpg")).toBeNull();
+    expect(screen.getByRole("button", { name: /ver el último trabajo/i })).toBeTruthy();
+  });
+
+  it("describe un último trabajo interrumpido o con errores", async () => {
+    mockApi({
+      current: job({
+        kind: "run",
+        status: "interrupted",
+        summary: null,
+        error: { code: "interrupted", message: "Se cerró la aplicación." },
+      }),
+    });
+    renderApp();
+
+    const last = await screen.findByRole("region", { name: /último trabajo/i });
+    expect(last.textContent).toMatch(/se interrumpió/i);
+  });
+
+  it("sin trabajo guardado no ofrece el último trabajo", async () => {
+    mockApi({});
+    renderApp();
+
+    await screen.findByRole("heading", { name: /empiece eligiendo las carpetas/i });
+    expect(screen.queryByRole("button", { name: /ver el último trabajo/i })).toBeNull();
+    expect(screen.queryByRole("region", { name: /último trabajo/i })).toBeNull();
+  });
+
+  it("un trabajo en curso se muestra directamente", async () => {
+    mockApi({ current: job({ kind: "run", status: "running", summary: null }) });
+    renderApp();
+
+    expect(await screen.findByRole("heading", { name: "Procesamiento" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /ver el último trabajo/i })).toBeNull();
+  });
+
+  it("una vista previa nueva reemplaza al último trabajo", async () => {
+    mockApi({
+      current: job({ source: { id: "x", name: "Viejas" } }),
+      routes: {
+        "/api/folders/verify": verified,
+        "/api/jobs/preview": () => ({ body: job() }),
+      },
+    });
+    renderApp(folders);
+    await screen.findByRole("button", { name: /ver el último trabajo/i });
+    await selectAndVerify();
+
+    fireEvent.click(screen.getByRole("button", { name: /ver vista previa/i }));
+    await screen.findByText("foto1.jpg");
+    fireEvent.click(screen.getByRole("button", { name: /cerrar/i }));
+
+    const last = await screen.findByRole("region", { name: /último trabajo/i });
+    expect(last.textContent).toMatch(/Originales/);
+    expect(last.textContent).not.toMatch(/Viejas/);
+  });
+});
+
+describe("recorrido de las fotos", () => {
+  const route = () => screen.getByRole("figure", { name: /recorrido de las fotos/i });
+
+  it("mientras se eligen las carpetas muestra el origen y el destino, no el lienzo", async () => {
+    mockApi({ routes: { "/api/folders/verify": verified } });
+    renderApp(folders);
+
+    await enabledButton(/elegir carpeta de origen/i);
+    expect(within(route()).getAllByText("Sin elegir")).toHaveLength(2);
+    expect(screen.queryByAltText(/ejemplo de resultado/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /elegir carpeta de origen/i }));
+    await screen.findAllByText("Origen");
+    expect(within(route()).getByText("Origen")).toBeTruthy();
+    expect(within(route()).getAllByText("Sin elegir")).toHaveLength(1);
+  });
+
+  it("con las carpetas verificadas muestra el lienzo de ejemplo", async () => {
+    mockApi({ routes: { "/api/folders/verify": verified } });
+    renderApp(folders);
+    await selectAndVerify();
+
+    expect(await screen.findByAltText(/ejemplo de resultado/i)).toBeTruthy();
+    expect(screen.queryByRole("figure", { name: /recorrido de las fotos/i })).toBeNull();
+  });
+
+  it("con la misma carpeta muestra un solo lugar", async () => {
+    mockApi({});
+    renderApp([folders[0]]);
+
+    fireEvent.click(await screen.findByLabelText(/misma carpeta/i));
+    fireEvent.click(await enabledButton(/elegir carpeta de origen/i));
+    await screen.findAllByText("Origen");
+
+    expect(within(route()).getByText(/origen y destino/i)).toBeTruthy();
+    expect(within(route()).queryByText("Sin elegir")).toBeNull();
+  });
+});
+
+describe("motivos de cada foto", () => {
+  const withReason = (reason: string) =>
+    job({
+      kind: "run",
+      summary: summary({
+        counts: { complete: 0, planned: 0, failed: 1, pending: 0, not_started: 0 },
+        complete: false,
+        can_run: false,
+        items: [item({ status: "failed", stage: "upload", reason })],
+      }),
+    });
+
+  it("un PNG en la papelera explica qué hacer", async () => {
+    mockApi({
+      current: withReason(
+        "el PNG remoto está en la papelera; no se vuelve a subir. No se sube otro PNG.",
+      ),
+    });
+    renderApp();
+    await openLastJob();
+
+    expect(await screen.findByText(/^El PNG remoto está en la papelera/)).toBeTruthy();
+    expect(screen.getByText(/restáurelo desde la papelera de drive/i)).toBeTruthy();
+  });
+
+  it("un motivo sin explicación conocida solo se muestra con mayúscula", async () => {
+    mockApi({ current: withReason("el archivo remoto no es image/png.") });
+    renderApp();
+    await openLastJob();
+
+    expect(await screen.findByText("El archivo remoto no es image/png.")).toBeTruthy();
+    expect(screen.queryByText(/papelera/i)).toBeNull();
+  });
+
+  it("la fila elegida para comparar conserva el aviso de error", async () => {
+    mockApi({
+      current: job({
+        kind: "run",
+        summary: summary({
+          can_run: false,
+          complete: false,
+          items: [
+            item({
+              status: "failed",
+              stage: "upload",
+              reason: "falló",
+              images: { original: true, result: true },
+            }),
+          ],
+        }),
+      }),
+    });
+    renderApp();
+    await openLastJob();
+
+    const button = await screen.findByRole("button", { name: "Comparar" });
+    const row = button.closest("li")!;
+    expect(row.className).toMatch(/\bbad\b/);
+    expect(row.className).toMatch(/\bselected\b/);
   });
 });

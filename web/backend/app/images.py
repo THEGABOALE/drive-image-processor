@@ -19,7 +19,7 @@ from image_processor.errors import EmptySegmentationError
 from image_processor.google_drive import local_processing
 from image_processor.naming import SUPPORTED_EXTENSIONS
 from image_processor.processing import MIN_SIDE, OutputOptions, normalize_image
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
 
 THUMBNAIL_MAX_SIDE = 1400
 SAMPLE_MAX_SIDE = 1200
@@ -190,13 +190,20 @@ class SampleSource:
         dx = target[0] - source[0] * scale
         dy = target[1] - source[1] * scale
 
+        matrix = (1 / scale, 0, -dx / scale, 0, 1 / scale, -dy / scale)
         framed = original.transform(
-            (width, height),
-            Image.Transform.AFFINE,
-            (1 / scale, 0, -dx / scale, 0, 1 / scale, -dy / scale),
-            resample=Image.Resampling.BICUBIC,
-            fillcolor=(255, 255, 255),
+            (width, height), Image.Transform.AFFINE, matrix, resample=Image.Resampling.BICUBIC
         )
+        # Donde la foto no llega, la misma foto desenfocada: sin bandas vacías.
+        covered = Image.new("L", original.size, 255).transform(
+            (width, height), Image.Transform.AFFINE, matrix, fillcolor=0
+        )
+        if covered.getextrema()[0] < 255:
+            # Un píxel menos de foto en el borde: el bicúbico lo mezcla con negro.
+            covered = covered.filter(ImageFilter.MinFilter(3))
+            backdrop = ImageOps.fit(original, (width, height), Image.Resampling.BILINEAR)
+            backdrop = backdrop.filter(ImageFilter.GaussianBlur(max(width, height) / 25))
+            framed = Image.composite(framed, backdrop, covered)
         framed.thumbnail((THUMBNAIL_MAX_SIDE, THUMBNAIL_MAX_SIDE), Image.Resampling.LANCZOS)
         content = _jpeg(framed)
 

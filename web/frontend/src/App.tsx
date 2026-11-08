@@ -20,7 +20,7 @@ import {
   type PickedFolder,
   type PickerConfig,
 } from "./google/picker";
-import JobPanel from "./Job";
+import JobPanel, { LastJob } from "./Job";
 import SampleCanvas from "./Sample";
 import OutputForm, { draftFrom, optionsFrom, outputProblem, type OutputDraft } from "./Output";
 import "./styles.css";
@@ -55,6 +55,8 @@ export default function App({
   const [busy, setBusy] = useState(false);
   const [pickerReady, setPickerReady] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
+  // Un trabajo terminado no se abre solo: queda a mano en el inicio.
+  const [lastJob, setLastJob] = useState<Job | null>(null);
   const [output, setOutput] = useState<OutputDraft | null>(null);
   const [railWidth, setRailWidth] = useState(storedRailWidth);
   const picker = useRef<PickerLike | null>(null);
@@ -91,11 +93,15 @@ export default function App({
     return () => clearInterval(timer);
   }, [authorizing, refresh, pollMs]);
 
-  // El trabajo sigue en el backend aunque se cierre o recargue la página.
+  // El trabajo sigue en el backend aunque se cierre o recargue la página. Si
+  // sigue en curso se muestra; si terminó, se ofrece sin ocupar el inicio.
   useEffect(() => {
     if (connectedSub === null) return;
     getCurrentJob()
-      .then(setJob)
+      .then((current) => {
+        if (current?.status === "running") setJob(current);
+        else setLastJob(current);
+      })
       .catch((error) => setProblem(message(error)));
   }, [connectedSub]);
 
@@ -128,9 +134,18 @@ export default function App({
       setSameFolder(false);
       setVerification(null);
       setJob(null);
+      setLastJob(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectedSub, pickerConfig?.client_id]);
+
+  // Cerrar el trabajo mostrado lo deja como el último, para volver a abrirlo.
+  const closeJob = () => {
+    if (job) setLastJob(job);
+    setJob(null);
+  };
+
+  const openLastJob = () => setJob(lastJob);
 
   const applyConnection = (next: Connection) =>
     setStatus((previous) => previous && { ...previous, connection: next });
@@ -160,7 +175,7 @@ export default function App({
       const folder = await picker.current?.pick(title);
       if (folder) {
         setVerification(null);
-        setJob(null);
+        closeJob();
         assign(folder);
       }
     });
@@ -186,7 +201,7 @@ export default function App({
   const toggleSameFolder = (checked: boolean) => {
     setSameFolder(checked);
     setVerification(null);
-    setJob(null);
+    closeJob();
   };
 
   const preview = () =>
@@ -198,7 +213,7 @@ export default function App({
 
   const changeOutput = (draft: OutputDraft) => {
     setOutput(draft);
-    setJob(null);
+    closeJob();
   };
 
   const execute = () =>
@@ -326,11 +341,16 @@ export default function App({
 
           <div className="folders">
             <FolderSlot
-              label="Carpeta de origen"
-              action="origen"
+              label={sameFolder ? "Carpeta (origen y destino)" : "Carpeta de origen"}
+              action={sameFolder ? "origen y destino" : "origen"}
               folder={source}
               busy={busy || !pickerReady || jobRunning}
-              onChoose={() => choose("Elegir la carpeta de origen", setSource)}
+              onChoose={() =>
+                choose(
+                  sameFolder ? "Elegir la carpeta de origen y destino" : "Elegir la carpeta de origen",
+                  setSource,
+                )
+              }
             />
             {!sameFolder && (
               <FolderSlot
@@ -363,12 +383,16 @@ export default function App({
           number={2}
           title="Resultado"
           done={Boolean(verification) && Boolean(output) && !problem_}
+          locked={!verification}
         >
+          {!verification && (
+            <p className="hint">Disponible después de verificar las carpetas.</p>
+          )}
           {limits && output && (
             <OutputForm
               draft={output}
               limits={limits}
-              disabled={jobRunning}
+              disabled={jobRunning || !verification}
               problem={problem_}
               onChange={changeOutput}
             />
@@ -403,18 +427,31 @@ export default function App({
       <main className="stage" aria-label="Vista previa y procesamiento">
         {alert}
         {job ? (
-          <JobPanel job={job} busy={busy} onRun={execute} />
-        ) : (
+          <JobPanel job={job} busy={busy} onRun={execute} onClose={closeJob} />
+        ) : verification ? (
           <div className="stage-empty">
             <div className="stage-empty-copy">
-              <h2>{verification ? "Todo listo para la vista previa" : "Elija sus carpetas"}</h2>
+              <h2>Todo listo para la vista previa</h2>
               <p>
-                {verification
-                  ? "La vista previa muestra qué fotos se van a procesar, sin cambiar nada todavía."
-                  : "Verifique las carpetas para ver qué se va a procesar."}
+                Ajuste el tamaño y el fondo: este es el lienzo que va a recibir cada foto. La vista
+                previa muestra qué se va a procesar, sin cambiar nada todavía.
               </p>
             </div>
             {output && !problem_ && <SampleCanvas options={optionsFrom(output)} />}
+            {lastJob && <LastJob job={lastJob} onOpen={openLastJob} />}
+          </div>
+        ) : (
+          <div className="stage-empty">
+            <div className="stage-empty-copy">
+              <h2>Empiece eligiendo las carpetas</h2>
+              <p>
+                {ready
+                  ? "Ya están elegidas. Verifíquelas para ajustar el resultado y ver la vista previa."
+                  : "Elija la carpeta con las fotos y dónde guardar los resultados. Después podrá ajustar el tamaño y el fondo, y revisar todo antes de procesar."}
+              </p>
+            </div>
+            <FolderRoute source={source} target={target} sameFolder={sameFolder} />
+            {lastJob && <LastJob job={lastJob} onOpen={openLastJob} />}
           </div>
         )}
       </main>
@@ -537,19 +574,22 @@ function Section({
   title,
   done = false,
   compact = false,
+  locked = false,
   children,
 }: {
   number?: number;
   title: string;
   done?: boolean;
   compact?: boolean;
+  locked?: boolean;
   children: React.ReactNode;
 }) {
   const id = `section-${title.replace(/\s+/g, "-").toLowerCase()}`;
+  const classes = ["rail-section", done && "done", compact && "compact", locked && "locked"];
 
   return (
     <section
-      className={`rail-section${done ? " done" : ""}${compact ? " compact" : ""}`}
+      className={classes.filter(Boolean).join(" ")}
       aria-labelledby={id}
     >
       <h2 id={id} className={compact ? "visually-hidden" : undefined}>
@@ -588,6 +628,74 @@ function FolderSlot({
       <button className="small" onClick={onChoose} disabled={busy}>
         {folder ? `Cambiar ${action}` : `Elegir carpeta de ${action}`}
       </button>
+    </div>
+  );
+}
+
+/** De dónde salen las fotos y adónde llegan los resultados. */
+function FolderRoute({
+  source,
+  target,
+  sameFolder,
+}: {
+  source: PickedFolder | null;
+  target: PickedFolder | null;
+  sameFolder: boolean;
+}) {
+  return (
+    <figure className={sameFolder ? "route single" : "route"} aria-label="Recorrido de las fotos">
+      {sameFolder ? (
+        <RouteStop
+          kind="both"
+          label="Carpeta de origen y destino"
+          detail="Las fotos y sus PNG sin fondo quedan juntos"
+          folder={source}
+        />
+      ) : (
+        <>
+          <RouteStop
+            kind="source"
+            label="Carpeta de origen"
+            detail="Las fotos originales, sin cambios"
+            folder={source}
+          />
+          <span className="route-link" aria-hidden="true">
+            <span className="route-step">Quitar fondo y centrar</span>
+          </span>
+          <RouteStop
+            kind="target"
+            label="Carpeta de destino"
+            detail="Los PNG sin fondo"
+            folder={target}
+          />
+        </>
+      )}
+    </figure>
+  );
+}
+
+function RouteStop({
+  kind,
+  label,
+  detail,
+  folder,
+}: {
+  kind: "source" | "target" | "both";
+  label: string;
+  detail: string;
+  folder: PickedFolder | null;
+}) {
+  return (
+    <div className={`route-stop route-${kind}${folder ? " chosen" : ""}`}>
+      <span className="route-art" aria-hidden="true">
+        <span className="route-photo" />
+        <span className="route-photo" />
+      </span>
+      <span className="route-label">{label}</span>
+      <span className={folder ? "route-name" : "route-name empty"}>
+        {folder ? folder.name : "Sin elegir"}
+      </span>
+      <span className="route-detail">{detail}</span>
     </div>
   );
 }

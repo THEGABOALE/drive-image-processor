@@ -36,6 +36,23 @@ const GROUP_AFTER = 6;
 
 const NEEDS_ATTENTION: JobItem["status"][] = ["failed", "pending", "not_started"];
 
+// Qué hacer ante motivos conocidos del motor. El motor no se cambia: aquí
+// solo se agrega la explicación para quien usa la pantalla.
+const REASON_HINTS: { match: RegExp; hint: string }[] = [
+  {
+    match: /en la papelera/i,
+    hint:
+      "Si quiere conservarlo, restáurelo desde la papelera de Drive y genere otra vista " +
+      "previa: figurará como ya en Drive.",
+  },
+];
+
+/** Los motivos del motor llegan en minúscula: se muestran como oraciones. */
+const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+const reasonHint = (reason: string) =>
+  REASON_HINTS.find(({ match }) => match.test(reason))?.hint ?? null;
+
 const imageCount = (count: number) =>
   count === 1 ? "1 imagen" : `${count} imágenes`;
 
@@ -98,6 +115,7 @@ export function Compare({ job, item }: { job: Job; item: JobItem }) {
           />
         </div>
         <span className="compare-line" aria-hidden="true" />
+        <span className="compare-knob" aria-hidden="true" />
         <span className="compare-tag compare-tag-left" aria-hidden="true">
           Original
         </span>
@@ -134,6 +152,7 @@ function ItemRow({
   const label =
     isPreview && item.status === "complete" ? "Ya está en Drive" : STATUS_LABELS[item.status];
   const classes = ["item", bad ? "bad" : "", selected ? "selected" : ""].filter(Boolean);
+  const hint = item.reason ? reasonHint(item.reason) : null;
 
   return (
     <li className={classes.join(" ")}>
@@ -151,10 +170,11 @@ function ItemRow({
           )}
         </span>
       </div>
-      {item.reason && <p className="item-detail">{item.reason}</p>}
+      {item.reason && <p className="item-detail">{sentence(item.reason)}</p>}
+      {hint && <p className="item-detail item-hint">{hint}</p>}
       {item.notes.map((note) => (
         <p className="item-detail" key={note}>
-          {note}
+          {sentence(note)}
         </p>
       ))}
       {item.related.map((related) => (
@@ -379,28 +399,96 @@ function Summary({ job, busy, onRun }: { job: Job; busy: boolean; onRun: () => v
   );
 }
 
+const jobTitle = (job: Job) => (job.kind === "preview" ? "Vista previa" : "Procesamiento");
+
+const jobFolders = (job: Job) =>
+  job.same_folder
+    ? `Carpeta: ${job.source.name}`
+    : `De ${job.source.name} a ${job.target.name}`;
+
+function jobOutcome(job: Job): { text: string; warn: boolean } {
+  if (job.status === "failed") return { text: "No se pudo completar.", warn: true };
+  if (job.status === "interrupted")
+    return { text: "Se interrumpió antes de terminar.", warn: true };
+
+  const summary = job.summary;
+  if (!summary) return { text: "", warn: false };
+
+  const { counts } = summary;
+  const errors = counts.failed + counts.pending + counts.not_started;
+
+  if (job.kind === "preview") {
+    const issues = errors > 0 ? ` · ${imageCount(errors)} con problemas` : "";
+    return { text: `${counts.planned} por procesar${issues}`, warn: errors > 0 };
+  }
+
+  return summary.complete
+    ? { text: `Todo quedó en Drive: ${imageCount(counts.complete)}`, warn: false }
+    : { text: `Terminó con ${imageCount(errors)} para revisar`, warn: true };
+}
+
+function jobDate(job: Job): string {
+  const seconds = job.finished_at ?? job.created_at;
+  try {
+    return new Date(seconds * 1000).toLocaleString("es", {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+  } catch {
+    return "";
+  }
+}
+
+/** El último trabajo, resumido en el inicio; se abre solo si se pide. */
+export function LastJob({ job, onOpen }: { job: Job; onOpen: () => void }) {
+  const outcome = jobOutcome(job);
+  const when = jobDate(job);
+
+  return (
+    <section className="last-job" aria-labelledby="last-job-title">
+      <div className="last-job-text">
+        <h3 id="last-job-title">Último trabajo</h3>
+        <p className="last-job-what">
+          {jobTitle(job)}
+          {when && <span className="last-job-when"> · {when}</span>}
+        </p>
+        {job.source.name && <p className="hint">{jobFolders(job)}</p>}
+        {outcome.text && (
+          <p className={outcome.warn ? "last-job-outcome warn" : "last-job-outcome"}>
+            {outcome.text}
+          </p>
+        )}
+      </div>
+      <button onClick={onOpen}>Ver el último trabajo</button>
+    </section>
+  );
+}
+
 export default function JobPanel({
   job,
   busy,
   onRun,
+  onClose,
 }: {
   job: Job;
   busy: boolean;
   onRun: () => void;
+  onClose: () => void;
 }) {
-  const title = job.kind === "preview" ? "Vista previa" : "Procesamiento";
-
   return (
     <div className="job">
       <header className="job-head">
-        <h2>{title}</h2>
+        <div className="job-title">
+          <h2>{jobTitle(job)}</h2>
+          {job.status !== "running" && (
+            <button className="small ghost" onClick={onClose}>
+              Cerrar
+            </button>
+          )}
+        </div>
         <div className="job-meta">
           {job.source.name && (
-            <p className="job-folders">
-              {job.same_folder
-                ? `Carpeta: ${job.source.name}`
-                : `De ${job.source.name} a ${job.target.name}`}
-            </p>
+            <p className="job-folders">{jobFolders(job)}</p>
           )}
           {job.options && <span className="tag">{describeOptions(job.options)}</span>}
         </div>

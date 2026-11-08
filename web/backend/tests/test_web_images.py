@@ -446,6 +446,29 @@ def test_aligned_original_keeps_the_photo_around_the_product(api, aligned_setup)
     assert abs(r - WALL[0]) < 25 and abs(g - WALL[1]) < 25 and abs(b - WALL[2]) < 25
 
 
+def test_where_the_photo_does_not_reach_it_is_filled_with_the_same_photo(
+    api, aligned_setup, settings
+):
+    from image_processor.processing import OutputOptions, normalize_image
+
+    # El producto toca el borde izquierdo de la foto: a su izquierda, en el
+    # encuadre del resultado, ya no hay foto.
+    downloads, outputs = dirs(settings)
+    photo = Image.new("RGB", (1000, 800), WALL)
+    photo.paste(PRODUCT, (0, 300, 100, 500))
+    photo.save(downloads / "foto--f1.png")
+    normalize_image(product_mask(photo, None), OutputOptions(400, 400, "white")).save(
+        outputs / "TRANSFORMADA_foto.png"
+    )
+
+    aligned = open_png(api.get("/api/jobs/current/images/f1/original?aligned=1").content)
+
+    # Ni blanco ni negro: la misma foto, desenfocada, sin bandas vacías.
+    for point in ((5, 5), (5, 200), (5, 395)):
+        r, g, b = aligned.convert("RGB").getpixel(point)
+        assert abs(r - WALL[0]) < 30 and abs(g - WALL[1]) < 30 and abs(b - WALL[2]) < 30, point
+
+
 def test_aligned_original_is_cut_once_and_cached(api, aligned_setup, settings):
     calls, _ = aligned_setup
 

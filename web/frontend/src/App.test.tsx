@@ -207,7 +207,7 @@ describe("conexión y desconexión", () => {
     const picker = renderApp([folder("origen", "Origen")]);
 
     fireEvent.click(await enabledButton(/elegir carpeta de origen/i));
-    await screen.findByText("Origen");
+    await screen.findAllByText("Origen");
 
     fireEvent.click(screen.getByRole("button", { name: /desconectar/i }));
 
@@ -233,9 +233,9 @@ describe("conexión y desconexión", () => {
 describe("selección de carpetas", () => {
   async function pickBoth(picker: ReturnType<typeof renderApp>) {
     fireEvent.click(await enabledButton(/elegir carpeta de origen/i));
-    await screen.findByText("Origen");
+    await screen.findAllByText("Origen");
     fireEvent.click(screen.getByRole("button", { name: /elegir carpeta de destino/i }));
-    await screen.findByText("Destino");
+    await screen.findAllByText("Destino");
     return picker;
   }
 
@@ -286,7 +286,7 @@ describe("selección de carpetas", () => {
     expect((verify as HTMLButtonElement).disabled).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: /elegir carpeta de origen/i }));
-    await screen.findByText("Origen");
+    await screen.findAllByText("Origen");
     expect((verify as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -301,7 +301,7 @@ describe("selección de carpetas", () => {
     expect(screen.queryByRole("button", { name: /elegir carpeta de destino/i })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /elegir carpeta de origen/i }));
-    await screen.findByText("Origen");
+    await screen.findAllByText("Origen");
     fireEvent.click(screen.getByRole("button", { name: /verificar carpetas/i }));
     await screen.findByText(/misma carpeta para originales y resultados/i);
 
@@ -360,7 +360,8 @@ describe("selección de carpetas", () => {
     expect(screen.queryByText("Destino")).toBeNull();
     expect(screen.queryByText(/misma carpeta para originales/i)).toBeNull();
     expect((screen.getByLabelText(/misma carpeta/i) as HTMLInputElement).checked).toBe(false);
-    expect(screen.getAllByText("Sin elegir")).toHaveLength(2);
+    // En los dos lugares del panel y en el recorrido de la pantalla.
+    expect(screen.getAllByText("Sin elegir")).toHaveLength(4);
   });
 
   it("cancelar el Picker no cambia la selección ni llama al backend", async () => {
@@ -369,10 +370,10 @@ describe("selección de carpetas", () => {
 
     const button = await screen.findByRole("button", { name: /elegir carpeta de origen/i });
     fireEvent.click(button);
-    await screen.findByText("Origen");
+    await screen.findAllByText("Origen");
     fireEvent.click(screen.getByRole("button", { name: /origen/i, description: "" }));
 
-    await waitFor(() => expect(screen.getByText("Origen")).toBeTruthy());
+    await waitFor(() => expect(screen.getAllByText("Origen").length).toBeGreaterThan(0));
     expect(screen.queryByRole("alert")).toBeNull();
     expect(posts(calls)).toEqual([]);
   });
@@ -422,7 +423,7 @@ describe("selección de carpetas", () => {
     await screen.findByText(/verificadas/i);
 
     fireEvent.click(screen.getByRole("button", { name: /cambiar destino/i }));
-    await screen.findByText("Otra");
+    await screen.findAllByText("Otra");
 
     expect(screen.queryByText(/verificadas/i)).toBeNull();
   });
