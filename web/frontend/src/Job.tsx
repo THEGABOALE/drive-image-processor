@@ -259,7 +259,7 @@ function Progress({ job }: { job: Job }) {
     <div className="running">
       <div className="meter">
         {percent !== null && <span className="bar-value">{shown} %</span>}
-        {percent === null && <span className="meter-label">Contando las fotos…</span>}
+        {percent === null && <span className="meter-label">Revisando las fotos…</span>}
         <div
           className={percent === null ? "bar indeterminate" : "bar"}
           role="progressbar"

@@ -1,6 +1,7 @@
 """Script de compilación del ejecutable. No ejecuta PyInstaller ni npm."""
 
 import json
+import os
 import subprocess
 import zipfile
 
@@ -206,6 +207,43 @@ def test_model_is_found_in_the_rembg_cache(tmp_path):
     model.write_bytes(b"x" * 10)
 
     assert build.find_model("isnet-general-use", home=tmp_path) == model
+
+
+# Dependencias del frontend ---------------------------------------------------
+
+def frontend_folder(tmp_path, *, installed=True, record=True, lock_newer=False):
+    folder = tmp_path / "frontend"
+    folder.mkdir()
+    lock = folder / "package-lock.json"
+    lock.write_text("{}", encoding="utf-8")
+    if installed:
+        (folder / "node_modules").mkdir()
+    if installed and record:
+        hidden = folder / "node_modules" / ".package-lock.json"
+        hidden.write_text("{}", encoding="utf-8")
+        # npm deja ese registro al instalar: más nuevo que el lock, salvo que
+        # el lock haya cambiado después (por ejemplo, al traer otra versión).
+        older, newer = (hidden, lock) if lock_newer else (lock, hidden)
+        os.utime(older, (1_000_000, 1_000_000))
+        os.utime(newer, (2_000_000, 2_000_000))
+    return folder
+
+
+def test_frontend_without_dependencies_needs_install(tmp_path):
+    assert build.needs_install(frontend_folder(tmp_path, installed=False))
+
+
+def test_frontend_without_npm_record_needs_install(tmp_path):
+    assert build.needs_install(frontend_folder(tmp_path, record=False))
+
+
+def test_frontend_with_a_newer_lock_needs_install(tmp_path):
+    # Las dependencias quedaron de una versión anterior: compilar fallaría.
+    assert build.needs_install(frontend_folder(tmp_path, lock_newer=True))
+
+
+def test_frontend_installed_from_the_current_lock_is_reused(tmp_path):
+    assert not build.needs_install(frontend_folder(tmp_path))
 
 
 # Git -------------------------------------------------------------------------

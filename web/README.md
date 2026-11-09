@@ -184,8 +184,8 @@ python web/packaging/build.py --config web/packaging/config
   `GOOGLE_DESKTOP_CLIENT_FILE=desktop_client.json`;
 - `desktop_client.json`: el JSON del cliente de escritorio de ese entorno.
 
-El script valida la configuración con las reglas de la aplicación, compila el
-frontend, toma el modelo de la caché de rembg (lo descarga si falta), arma el
+El script valida la configuración con las reglas de la aplicación, instala las
+dependencias del frontend si faltan o cambiaron (`npm ci`), compila el frontend, toma el modelo de la caché de rembg (lo descarga si falta), arma el
 programa con PyInstaller (una carpeta, con consola), le agrega `config/`, el
 modelo y `LEEME.txt`, prueba el ejecutable con `--selftest` y deja
 `web/packaging/DriveImageProcessor-<entorno>.zip`.

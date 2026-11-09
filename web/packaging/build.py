@@ -207,6 +207,20 @@ def _run(command: list[str], **kwargs) -> None:
         raise BuildError(f"Falló: {' '.join(command[:3])} ({type(exc).__name__}).") from None
 
 
+def needs_install(frontend: Path) -> bool:
+    """
+    Si hay que instalar las dependencias del frontend antes de compilar.
+
+    npm deja node_modules/.package-lock.json al instalar. Si falta, o si
+    package-lock.json cambió después (otra versión del repositorio con otras
+    dependencias), lo instalado no corresponde y la compilación fallaría.
+    """
+    record = frontend / "node_modules" / ".package-lock.json"
+    if not record.is_file():
+        return True
+    return (frontend / "package-lock.json").stat().st_mtime > record.stat().st_mtime
+
+
 def build(config_folder: Path, output: Path) -> Path:
     config = check_config(config_folder)
 
@@ -214,7 +228,7 @@ def build(config_folder: Path, output: Path) -> Path:
         print(f"[AVISO] {config.warning}")
 
     npm = "npm.cmd" if os.name == "nt" else "npm"
-    if not (FRONTEND / "node_modules").is_dir():
+    if needs_install(FRONTEND):
         _run([npm, "ci"], cwd=FRONTEND)
     _run([npm, "run", "build"], cwd=FRONTEND)
 
