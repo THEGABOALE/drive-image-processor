@@ -250,56 +250,58 @@ export default function App({
         <main className="welcome-body">
           <section className="welcome-copy" aria-labelledby="account-title">
             <h1>Fotos de producto sin fondo, directo en su Drive</h1>
-            <p className="lead">
-              La aplicación toma cada foto de una carpeta, recorta el producto, lo centra en un
-              lienzo blanco o transparente y guarda el PNG en la carpeta que usted elija. Las fotos
-              originales nunca se tocan.
-            </p>
+            <div className="welcome-panel">
+              <p className="lead">
+                La aplicación toma cada foto de una carpeta, recorta el producto, lo centra en un
+                lienzo blanco o transparente y guarda el PNG en la carpeta que usted elija. Las fotos
+                originales nunca se tocan.
+              </p>
 
-            <ol className="how">
-              <li>Conecte su cuenta de Google.</li>
-              <li>Elija la carpeta de las fotos y dónde guardar los resultados.</li>
-              <li>Revise la vista previa y confirme el procesamiento.</li>
-            </ol>
+              <ol className="how">
+                <li>Conecte su cuenta de Google.</li>
+                <li>Elija la carpeta de las fotos y dónde guardar los resultados.</li>
+                <li>Revise la vista previa y confirme el procesamiento.</li>
+              </ol>
 
-            <h2 id="account-title" className="visually-hidden">
-              Cuenta de Google Drive
-            </h2>
+              <h2 id="account-title" className="visually-hidden">
+                Cuenta de Google Drive
+              </h2>
 
-            {alert}
+              {alert}
 
-            {!status && !problem && <p className="hint">Consultando el estado…</p>}
+              {!status && !problem && <p className="hint">Consultando el estado…</p>}
 
-            {connection?.state === "disconnected" && (
-              <div className="connect">
-                <button className="primary large" onClick={connect} disabled={busy}>
-                  Conectar Google Drive
-                </button>
-                <p className="hint">
-                  Google pedirá dos autorizaciones: una para leer los originales y otra para crear
-                  los resultados. Use la misma cuenta en ambas.
-                </p>
-              </div>
-            )}
+              {connection?.state === "disconnected" && (
+                <div className="connect">
+                  <button className="primary large" onClick={connect} disabled={busy}>
+                    Conectar Google Drive
+                  </button>
+                  <p className="hint">
+                    Google pedirá dos autorizaciones: una para leer los originales y otra para crear
+                    los resultados. Use la misma cuenta en ambas.
+                  </p>
+                </div>
+              )}
 
-            {authorizing && (
-              <div className="connect waiting">
-                <span className="spinner" aria-hidden="true" />
-                <p>Complete la autorización en el navegador ({authorizing}).</p>
-                <button onClick={cancel} disabled={busy}>
-                  Cancelar
-                </button>
-              </div>
-            )}
+              {authorizing && (
+                <div className="connect waiting">
+                  <span className="spinner" aria-hidden="true" />
+                  <p>Complete la autorización en el navegador ({authorizing}).</p>
+                  <button onClick={cancel} disabled={busy}>
+                    Cancelar
+                  </button>
+                </div>
+              )}
 
-            {connection?.state === "reconnect_required" && (
-              <div className="connect">
-                <p>{connection.message ?? "La autorización ya no es válida."}</p>
-                <button className="primary large" onClick={connect} disabled={busy}>
-                  Volver a conectar
-                </button>
-              </div>
-            )}
+              {connection?.state === "reconnect_required" && (
+                <div className="connect">
+                  <p>{connection.message ?? "La autorización ya no es válida."}</p>
+                  <button className="primary large" onClick={connect} disabled={busy}>
+                    Volver a conectar
+                  </button>
+                </div>
+              )}
+            </div>
           </section>
 
           <Comparison />
@@ -309,9 +311,11 @@ export default function App({
   }
 
   const canPreview = Boolean(verification) && !jobRunning;
+  // Con una foto que mirar, en pantallas angostas va antes que los controles.
+  const shellClass = job || verification ? "shell has-work" : "shell";
 
   return (
-    <div className="shell" style={{ ["--rail-width" as string]: `${railWidth}px` }}>
+    <div className={shellClass} style={{ ["--rail-width" as string]: `${railWidth}px` }}>
       <aside className="rail">
         <header className="rail-top">
           <Brand />
@@ -408,8 +412,9 @@ export default function App({
         <div className="rail-end">
           {canPreview && (
             <div className="rail-action">
+              {/* Con un trabajo a la vista, su acción es la amarilla: esta se aparta. */}
               <button
-                className="primary large"
+                className={job ? "large" : "primary large"}
                 onClick={preview}
                 disabled={busy || Boolean(problem_) || !output}
               >
@@ -441,29 +446,33 @@ export default function App({
             onRegenerate={regenerate}
           />
         ) : verification ? (
-          <div className="stage-empty">
-            <div className="stage-empty-copy">
-              <h2>Todo listo para la vista previa</h2>
-              <p>
-                Ajuste el tamaño y el fondo: este es el lienzo que va a recibir cada foto. La vista
-                previa muestra qué se va a procesar, sin cambiar nada todavía.
-              </p>
-            </div>
+          <div className="stage-ready">
             {output && !problem_ && <SampleCanvas options={optionsFrom(output)} />}
-            {lastJob && <LastJob job={lastJob} onOpen={openLastJob} />}
+            <div className="stage-side">
+              <div className="stage-note">
+                <h2>Todo listo para la vista previa</h2>
+                <p>
+                  Ajuste el tamaño y el fondo: este es el lienzo que va a recibir cada foto. La
+                  vista previa muestra qué se va a procesar, sin cambiar nada todavía.
+                </p>
+              </div>
+              {lastJob && <LastJob job={lastJob} onOpen={openLastJob} />}
+            </div>
           </div>
         ) : (
-          <div className="stage-empty">
-            <div className="stage-empty-copy">
-              <h2>Empiece eligiendo las carpetas</h2>
-              <p>
-                {ready
-                  ? "Ya están elegidas. Verifíquelas para ajustar el resultado y ver la vista previa."
-                  : "Elija la carpeta con las fotos y dónde guardar los resultados. Después podrá ajustar el tamaño y el fondo, y revisar todo antes de procesar."}
-              </p>
-            </div>
+          <div className="stage-start">
             <FolderRoute source={source} target={target} sameFolder={sameFolder} />
-            {lastJob && <LastJob job={lastJob} onOpen={openLastJob} />}
+            <div className="stage-side">
+              <div className="stage-note">
+                <h2>Empiece eligiendo las carpetas</h2>
+                <p>
+                  {ready
+                    ? "Ya están elegidas. Verifíquelas para ajustar el resultado y ver la vista previa."
+                    : "Elija la carpeta con las fotos y dónde guardar los resultados. Después podrá ajustar el tamaño y el fondo, y revisar todo antes de procesar."}
+                </p>
+              </div>
+              {lastJob && <LastJob job={lastJob} onOpen={openLastJob} />}
+            </div>
           </div>
         )}
       </main>
@@ -699,15 +708,13 @@ function RouteStop({
 }) {
   return (
     <div className={`route-stop route-${kind}${folder ? " chosen" : ""}`}>
-      <span className="route-art" aria-hidden="true">
-        <span className="route-photo" />
-        <span className="route-photo" />
+      <span className="route-caption">
+        <span className="route-label">{label}</span>
+        <span className="route-detail">{detail}</span>
       </span>
-      <span className="route-label">{label}</span>
       <span className={folder ? "route-name" : "route-name empty"}>
         {folder ? folder.name : "Sin elegir"}
       </span>
-      <span className="route-detail">{detail}</span>
     </div>
   );
 }

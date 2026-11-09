@@ -256,9 +256,10 @@ function Progress({ job }: { job: Job }) {
     progress.processing.done === 0;
 
   return (
-    <>
+    <div className="running">
       <div className="meter">
         {percent !== null && <span className="bar-value">{shown} %</span>}
+        {percent === null && <span className="meter-label">Contando las fotos…</span>}
         <div
           className={percent === null ? "bar indeterminate" : "bar"}
           role="progressbar"
@@ -303,7 +304,24 @@ function Progress({ job }: { job: Job }) {
       <p className="hint">
         Puede cerrar esta pestaña: el trabajo sigue mientras la aplicación esté abierta.
       </p>
-    </>
+    </div>
+  );
+}
+
+/** La cifra principal del resumen, grande; el texto completo queda para lectores de pantalla. */
+function Figure({ value, label }: { value: number; label: string }) {
+  return (
+    <li className="count figure">
+      <span className="figure-number" aria-hidden="true">
+        {value}
+      </span>
+      <span className="figure-label" aria-hidden="true">
+        {label}
+      </span>
+      <span className="visually-hidden">
+        {value} {label}
+      </span>
+    </li>
   );
 }
 
@@ -368,23 +386,22 @@ function Summary({
   const [selectedId, setSelectedId] = useState<string | null>(first?.file_id ?? null);
   const selected = summary.items.find((item) => item.file_id === selectedId && comparable(item));
 
-  return (
-    <>
-      <p className={unfinished ? "headline warn" : "headline"}>{headline}</p>
+  const tally = (
+    <div className={unfinished ? "tally warn" : "tally"}>
+      <p className="headline">{headline}</p>
 
       <ul className="counts">
         {isPreview ? (
           <>
-            <li className="count accent">{counts.planned} por procesar</li>
+            <Figure value={counts.planned} label="por procesar" />
             <li className="count">{counts.complete} ya en Drive</li>
           </>
         ) : (
           <>
-            <li className="count accent">
-              {summary.uploaded_now === 1
-                ? "1 PNG subido ahora"
-                : `${summary.uploaded_now} PNG subidos ahora`}
-            </li>
+            <Figure
+              value={summary.uploaded_now}
+              label={summary.uploaded_now === 1 ? "PNG subido ahora" : "PNG subidos ahora"}
+            />
             <li className="count">{counts.complete} en Drive</li>
           </>
         )}
@@ -404,45 +421,6 @@ function Summary({
         {removed.length > 0 && <li className="count">{removedCount(removed.length)}</li>}
       </ul>
 
-      {summary.stopped && (
-        <p className="alert" role="alert">
-          Se detuvo en {STAGE_NAMES[summary.stopped.stage] ?? "una etapa"}: {summary.stopped.message}
-        </p>
-      )}
-
-      {selected && <Compare job={job} item={selected} key={selected.file_id} />}
-
-      {summary.items.length > 0 && (
-        <Items
-          items={summary.items}
-          isPreview={isPreview}
-          selectedId={selected?.file_id ?? null}
-          onCompare={(item) => setSelectedId(item.file_id)}
-        />
-      )}
-
-      {summary.warnings.map((warning) => (
-        <p className="hint" key={warning}>
-          {warning}
-        </p>
-      ))}
-
-      {removed.length > 0 && (
-        <RemovedNote items={removed} busy={busy} onRegenerate={onRegenerate} />
-      )}
-
-      {unfinished && (
-        <p>Quedó trabajo sin terminar. Vuelva a generar la vista previa: lo ya hecho no se repite.</p>
-      )}
-
-      {isPreview && (
-        <p className="hint">
-          Los originales no se modifican ni se borran: se crean PNG nuevos en el destino. Es una
-          estimación: lo que dependa de la descarga o del procesamiento se sabrá al ejecutar. Si
-          agrega fotos a la carpeta antes de ejecutar, también se procesan.
-        </p>
-      )}
-
       {isPreview && !summary.can_run && !summary.stopped && (
         <p className="headline-small">No hay nada que procesar.</p>
       )}
@@ -452,7 +430,58 @@ function Summary({
           Procesar {imageCount(toRun)}
         </button>
       )}
-    </>
+    </div>
+  );
+
+  return (
+    <div className={selected ? "summary" : "summary no-view"}>
+      {selected && (
+        <div className="summary-view">
+          <Compare job={job} item={selected} key={selected.file_id} />
+        </div>
+      )}
+
+      {tally}
+
+      <div className="summary-list">
+        {summary.stopped && (
+          <p className="alert" role="alert">
+            Se detuvo en {STAGE_NAMES[summary.stopped.stage] ?? "una etapa"}: {summary.stopped.message}
+          </p>
+        )}
+
+        {summary.items.length > 0 && (
+          <Items
+            items={summary.items}
+            isPreview={isPreview}
+            selectedId={selected?.file_id ?? null}
+            onCompare={(item) => setSelectedId(item.file_id)}
+          />
+        )}
+
+        {summary.warnings.map((warning) => (
+          <p className="hint" key={warning}>
+            {warning}
+          </p>
+        ))}
+
+        {removed.length > 0 && (
+          <RemovedNote items={removed} busy={busy} onRegenerate={onRegenerate} />
+        )}
+
+        {unfinished && (
+          <p>Quedó trabajo sin terminar. Vuelva a generar la vista previa: lo ya hecho no se repite.</p>
+        )}
+
+        {isPreview && (
+          <p className="hint">
+            Los originales no se modifican ni se borran: se crean PNG nuevos en el destino. Es una
+            estimación: lo que dependa de la descarga o del procesamiento se sabrá al ejecutar. Si
+            agrega fotos a la carpeta antes de ejecutar, también se procesan.
+          </p>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -495,6 +524,28 @@ function jobDate(job: Job): string {
   } catch {
     return "";
   }
+}
+
+/** De qué carpeta a cuál, en grande: lo primero que se lee del trabajo. */
+function JobRoute({ job }: { job: Job }) {
+  if (job.same_folder) {
+    return (
+      <p className="job-folders job-route">
+        <span className="visually-hidden">Carpeta: </span>
+        <span className="job-route-name">{job.source.name}</span>
+      </p>
+    );
+  }
+
+  return (
+    <p className="job-folders job-route">
+      <span className="visually-hidden">De </span>
+      <span className="job-route-name">{job.source.name}</span>
+      <span className="visually-hidden"> a </span>
+      <span className="job-route-arrow" aria-hidden="true" />
+      <span className="job-route-name">{job.target.name}</span>
+    </p>
+  );
 }
 
 /** El último trabajo, resumido en el inicio; se abre solo si se pide. */
@@ -546,12 +597,8 @@ export default function JobPanel({
             </button>
           )}
         </div>
-        <div className="job-meta">
-          {job.source.name && (
-            <p className="job-folders">{jobFolders(job)}</p>
-          )}
-          {job.options && <span className="tag">{describeOptions(job.options)}</span>}
-        </div>
+        {job.source.name && <JobRoute job={job} />}
+        {job.options && <span className="tag">{describeOptions(job.options)}</span>}
       </header>
 
       {job.status === "running" && <Progress job={job} />}
