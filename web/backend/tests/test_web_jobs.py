@@ -1274,3 +1274,207 @@ def test_api_rejects_malformed_options(api, drive, options):
 
     assert response.status_code == 422
     assert api.get("/api/jobs/current").json() == {"job": None}
+
+
+# PNG borrados de Drive a propósito --------------------------------------------
+
+def delete_for_good(drive, item):
+    """Lo que hace Drive al vaciar la papelera: el archivo deja de existir."""
+    drive.items.pop(item["id"])
+    drive.children[TARGET].remove(item)
+
+
+def ledgers(settings):
+    return sorted((folder_dirs(settings, "sub-a", SOURCE)[1] / ".uploads").glob("*/*"))
+
+
+def removed_preview(jobs, drive):
+    add_photo(drive, "foto1")
+    previewed_and_run(jobs)
+    delete_for_good(drive, uploaded(drive)[0])
+    return preview(jobs)
+
+
+def test_a_png_deleted_from_drive_is_a_note_not_an_error(jobs, drive):
+    job = removed_preview(jobs, drive)
+
+    item = items_by_id(job)["foto1"]
+    assert item["status"] == "removed"
+    assert item["reason"] is None
+    counts = job["summary"]["counts"]
+    assert counts["removed"] == 1
+    assert counts["failed"] == 0
+    assert job["summary"]["complete"] is True
+    assert job["summary"]["can_run"] is False
+
+
+def test_a_png_in_the_trash_is_still_an_error(jobs, drive):
+    add_photo(drive, "foto1")
+    previewed_and_run(jobs)
+    uploaded(drive)[0]["trashed"] = True
+
+    job = preview(jobs)
+
+    assert items_by_id(job)["foto1"]["status"] == "failed"
+    assert "papelera" in items_by_id(job)["foto1"]["reason"]
+    assert job["summary"]["counts"]["removed"] == 0
+
+
+def test_a_run_also_reports_the_deleted_png_as_a_note(jobs, drive):
+    removed_preview(jobs, drive)
+    add_photo(drive, "foto2")
+
+    job = previewed_and_run(jobs)
+
+    assert items_by_id(job)["foto1"]["status"] == "removed"
+    assert job["summary"]["uploaded_now"] == 1
+    assert job["summary"]["complete"] is True
+
+
+def test_regenerating_forgets_the_record_and_only_previews(jobs, drive, settings):
+    job = removed_preview(jobs, drive)
+    before = ledgers(settings)
+
+    new = jobs.regenerate_removed(job["id"])
+
+    assert new["kind"] == PREVIEW
+    assert new["status"] == FINISHED
+    assert items_by_id(new)["foto1"]["status"] == "planned"
+    assert new["summary"]["can_run"] is True
+    # Nada se sube hasta confirmar.
+    assert uploaded(drive) == []
+    # El registro no se borra: queda apartado, con otro nombre.
+    after = ledgers(settings)
+    assert len(before) == len(after) == 1
+    assert after[0].name.startswith(before[0].name + ".borrado-")
+
+
+def test_after_regenerating_the_run_uploads_it_again(jobs, drive):
+    job = removed_preview(jobs, drive)
+    new = jobs.regenerate_removed(job["id"])
+
+    done = jobs.start_run(new["id"])
+
+    assert done["summary"]["uploaded_now"] == 1
+    assert done["summary"]["complete"] is True
+    assert len(uploaded(drive)) == 1
+
+
+def test_regenerating_never_touches_drive(jobs, drive):
+    job = removed_preview(jobs, drive)
+    drive.write.calls.clear()
+
+    jobs.regenerate_removed(job["id"])
+
+    operations = {op for op, _ in drive.write.calls + drive.read.calls}
+    assert not operations & {"files.create", "files.update", "files.delete", "files.trash"}
+
+
+def test_regenerating_is_refused_if_drive_still_has_the_png(jobs, drive, settings):
+    add_photo(drive, "foto1")
+    previewed_and_run(jobs)
+    remote = uploaded(drive)[0]
+    delete_for_good(drive, remote)
+    job = preview(jobs)
+    # Vuelve a aparecer (por ejemplo, no se había borrado del todo).
+    drive.items[remote["id"]] = remote
+    before = ledgers(settings)
+
+    with pytest.raises(PreviewNotUsableError) as error:
+        jobs.regenerate_removed(job["id"])
+
+    assert error.value.code == "removed_not_confirmed"
+    assert ledgers(settings) == before
+    assert current(jobs)["id"] == job["id"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"source_file_id": "otra"},
+        {"target_folder_id": "ajena"},
+        {"status": "pending"},
+        {"remote_id": "no'valido"},
+    ],
+)
+def test_regenerating_ignores_a_record_that_does_not_match(jobs, drive, settings, change):
+    job = removed_preview(jobs, drive)
+    (path,) = ledgers(settings)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**record, **change}), encoding="utf-8")
+
+    with pytest.raises(PreviewNotUsableError) as error:
+        jobs.regenerate_removed(job["id"])
+
+    assert error.value.code == "removed_not_confirmed"
+    assert ledgers(settings) == [path]
+
+
+def test_regenerating_only_uses_the_job_of_the_connected_account(
+    jobs, drive, settings, connection, monkeypatch
+):
+    import dataclasses
+
+    job = removed_preview(jobs, drive)
+    status = connection.status()
+    other = dataclasses.replace(status, account=dataclasses.replace(status.account, sub="sub-b"))
+    monkeypatch.setattr(connection, "status", lambda: other)
+    before = ledgers(settings)
+
+    with pytest.raises(PreviewNotUsableError) as error:
+        jobs.regenerate_removed(job["id"])
+
+    assert error.value.code == "job_not_current"
+    assert ledgers(settings) == before
+
+
+def test_regenerating_needs_the_current_job(jobs, drive):
+    removed_preview(jobs, drive)
+
+    with pytest.raises(PreviewNotUsableError) as error:
+        jobs.regenerate_removed("b" * 32)
+
+    assert error.value.code == "job_not_current"
+
+
+def test_regenerating_needs_a_deleted_png(jobs, drive):
+    add_photo(drive, "foto1")
+    job = previewed_and_run(jobs)
+
+    with pytest.raises(PreviewNotUsableError) as error:
+        jobs.regenerate_removed(job["id"])
+
+    assert error.value.code == "nothing_to_regenerate"
+
+
+def test_regenerating_requires_a_connection(jobs, drive, connection):
+    job = removed_preview(jobs, drive)
+    connection.disconnect()
+
+    with pytest.raises(NotConnectedError):
+        jobs.regenerate_removed(job["id"])
+
+
+def test_api_regenerate_starts_a_new_preview(api, jobs, drive):
+    job = removed_preview(jobs, drive)
+
+    response = api.post(f"/api/jobs/{job['id']}/regenerate")
+
+    assert response.status_code == 200
+    assert response.json()["kind"] == PREVIEW
+    assert "files" not in response.json()
+    assert api.get("/api/jobs/current").json()["job"]["id"] == response.json()["id"]
+
+
+def test_api_regenerate_of_another_job_is_a_conflict(api, jobs, drive):
+    removed_preview(jobs, drive)
+
+    response = api.post(f"/api/jobs/{'b' * 32}/regenerate")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "job_not_current"
+
+
+@pytest.mark.parametrize("job_id", ["corto", "z" * 32])
+def test_api_regenerate_validates_the_id(api, job_id):
+    assert api.post(f"/api/jobs/{job_id}/regenerate").status_code == 422

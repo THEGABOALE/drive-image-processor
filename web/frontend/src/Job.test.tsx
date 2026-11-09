@@ -1402,3 +1402,124 @@ describe("motivos de cada foto", () => {
     expect(row.className).toMatch(/\bselected\b/);
   });
 });
+
+describe("PNG borrados de Drive", () => {
+  const removedItem = () =>
+    item({
+      file_id: "f9",
+      name: "borrada.jpg",
+      status: "removed",
+      stage: "upload",
+      reason: null,
+      actions: [],
+      undetermined: [],
+    });
+
+  const withRemoved = (overrides: Partial<Job> = {}) =>
+    job({
+      kind: "run",
+      summary: summary({
+        counts: { complete: 1, planned: 0, failed: 0, pending: 0, not_started: 0, removed: 1 },
+        uploaded_now: 0,
+        complete: true,
+        can_run: false,
+        items: [item({ status: "complete", actions: [], undetermined: [] }), removedItem()],
+      }),
+      ...overrides,
+    });
+
+  it("se muestran como una nota al final, no como un error", async () => {
+    mockApi({ current: withRemoved() });
+    renderApp();
+    await openLastJob();
+
+    // El nombre figura en su fila y en la nota.
+    const row = (await screen.findAllByText("borrada.jpg"))
+      .map((name) => name.closest("li"))
+      .find(Boolean)!;
+    expect(row.className).not.toMatch(/\bbad\b/);
+    expect(within(row).getByText("Borrado de Drive")).toBeTruthy();
+    expect(screen.queryByText(/con errores/i)).toBeNull();
+    expect(screen.getByText("1 borrado de Drive")).toBeTruthy();
+    expect(screen.getByText(/listo, con una nota/i)).toBeTruthy();
+
+    const note = screen.getByRole("region", { name: /png borrados de drive/i });
+    expect(note.textContent).toMatch(/borrada\.jpg/);
+    expect(note.textContent).toMatch(/no se vuelven a subir solos/i);
+    expect(within(note).getByRole("button", { name: "Volver a generarlo" })).toBeTruthy();
+  });
+
+  it("volver a generar crea una vista previa nueva de ese trabajo", async () => {
+    const regenerated = job({ id: "b".repeat(32) });
+    const { calls } = mockApi({
+      current: withRemoved(),
+      routes: { [`/api/jobs/${JOB_ID}/regenerate`]: () => ({ body: regenerated }) },
+    });
+    renderApp();
+    await openLastJob();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Volver a generarlo" }));
+
+    expect(await screen.findByRole("button", { name: /procesar 1 imagen/i })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Vista previa" })).toBeTruthy();
+    const post = posts(calls).find((c) => c.url === `/api/jobs/${JOB_ID}/regenerate`)!;
+    expect(post.init!.body).toBeUndefined();
+    expect((post.init!.headers as Record<string, string>)["X-CSRF-Token"]).toBe(CSRF);
+  });
+
+  it("con varios, el botón los nombra en plural", async () => {
+    mockApi({
+      current: withRemoved({
+        summary: summary({
+          counts: { complete: 0, planned: 0, failed: 0, pending: 0, not_started: 0, removed: 2 },
+          can_run: false,
+          items: [removedItem(), { ...removedItem(), file_id: "f8", name: "otra.jpg" }],
+        }),
+      }),
+    });
+    renderApp();
+    await openLastJob();
+
+    expect(await screen.findByRole("button", { name: "Volver a generarlos" })).toBeTruthy();
+    expect(screen.getByText("2 borrados de Drive")).toBeTruthy();
+  });
+
+  it("si no se puede confirmar que se borraron, muestra el motivo", async () => {
+    mockApi({
+      current: withRemoved(),
+      routes: {
+        [`/api/jobs/${JOB_ID}/regenerate`]: () => ({
+          status: 409,
+          body: {
+            error: { code: "removed_not_confirmed", message: "No se pudo confirmar que se borraron." },
+          },
+        }),
+      },
+    });
+    renderApp();
+    await openLastJob();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Volver a generarlo" }));
+
+    expect((await screen.findByRole("alert")).textContent).toMatch(/no se pudo confirmar/i);
+    expect(screen.getAllByText("borrada.jpg").length).toBeGreaterThan(0);
+  });
+
+  it("sin PNG borrados no hay nota", async () => {
+    mockApi({ current: job() });
+    renderApp();
+    await openLastJob();
+
+    await screen.findByText("foto1.jpg");
+    expect(screen.queryByRole("region", { name: /png borrados de drive/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /volver a generar/i })).toBeNull();
+  });
+
+  it("el resumen del último trabajo lo menciona", async () => {
+    mockApi({ current: withRemoved() });
+    renderApp();
+
+    const last = await screen.findByRole("region", { name: /último trabajo/i });
+    expect(last.textContent).toMatch(/1 borrado de Drive/);
+  });
+});

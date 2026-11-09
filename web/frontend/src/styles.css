@@ -1531,6 +1531,38 @@ button.ghost[aria-pressed="true"] {
   }
 }
 
+/* Nota de PNG borrados de Drive ------------------------------------------- */
+
+.removed-note {
+  display: grid;
+  gap: 0.6rem;
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius);
+  background: var(--rail);
+  box-shadow: inset 3px 0 0 var(--line-strong), inset 0 0 0 1px var(--line);
+}
+
+.removed-note h3 {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.removed-note strong {
+  overflow-wrap: anywhere;
+}
+
+.removed-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}
+
+.status-removed::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--muted);
+}
+
 /* Recorrido de las fotos: de la carpeta de origen a la de destino --------- */
 
 .route {

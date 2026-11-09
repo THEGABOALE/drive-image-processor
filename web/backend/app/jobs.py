@@ -20,6 +20,13 @@ acercarse al límite de longitud de las rutas de Windows.
 El último trabajo de cada cuenta se guarda en disco. Uno que figura en curso
 sin estar activo se interrumpió porque se cerró la aplicación: volver a
 ejecutar retoma con los registros del motor, sin duplicar.
+
+PNG borrados de Drive: si un PNG que la aplicación subió ya no existe en Drive
+(se borró definitivamente), el motor no lo vuelve a subir solo, por si se
+borró a propósito. La pantalla lo muestra como una nota ("removed") y no como
+un error. Para volver a generarlo, se confirma con Drive que ya no existe, se
+aparta el registro local de esa subida (se renombra, no se borra) y se crea una
+vista previa nueva: nada se sube hasta que se confirme.
 """
 
 import copy
@@ -33,7 +40,9 @@ from dataclasses import asdict
 from pathlib import Path
 
 from image_processor import batch
-from image_processor.google_drive import downloads, sync, uploads
+from image_processor.google_drive import client as drive_client
+from image_processor.google_drive import downloads, queries, sync, uploads
+from image_processor.google_drive.errors import DriveNotFoundError
 from image_processor.processing import OutputOptions
 
 from .connection import NotConnectedError, State
@@ -51,6 +60,12 @@ RUNNING = "running"
 FINISHED = "finished"
 FAILED = "failed"
 INTERRUPTED = "interrupted"
+
+# Estado propio de la pantalla: un PNG subido antes que ya no está en Drive.
+REMOVED = "removed"
+
+# Comienzo del motivo con el que el motor informa ese caso (uploads.py).
+_REMOVED_REASON = "el PNG subido antes ya no existe en Drive"
 
 PREVIEW_MAX_AGE_SECONDS = 3600
 
@@ -113,6 +128,52 @@ def _local_files(summary) -> dict:
         }
         for item in summary.plan
     }
+
+
+def _is_removed(item) -> bool:
+    return (
+        item.status == sync.FAILED
+        and item.stage == sync.UPLOAD
+        and (item.reason or "").startswith(_REMOVED_REASON)
+    )
+
+
+def _forgettable_record(path: Path, file_id: str, target_id: str) -> dict | None:
+    """El registro de subida de esa foto en ese destino, o None."""
+
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+
+    if not (
+        isinstance(record, dict)
+        and record.get("source_file_id") == file_id
+        and record.get("target_folder_id") == target_id
+        and record.get("status") in (uploads.LEDGER_COMPLETED, uploads.LEDGER_MISMATCH)
+        and isinstance(record.get("remote_id"), str)
+    ):
+        return None
+
+    try:
+        queries.validate_file_id(record["remote_id"])
+    except ValueError:
+        return None
+
+    return record
+
+
+def _gone_from_drive(write_service, remote_id: str) -> bool:
+    """Solo lectura: el PNG ya no existe (en la papelera todavía existe)."""
+
+    try:
+        drive_client.execute(
+            write_service.files().get(fileId=remote_id, fields="id", supportsAllDrives=True)
+        )
+    except DriveNotFoundError:
+        return True
+
+    return False
 
 
 def _can_run(kind: str, stopped, counts: dict) -> bool:
@@ -283,6 +344,72 @@ class JobManager:
 
         return job
 
+    # PNG borrados de Drive ----------------------------------------------------
+
+    def regenerate_removed(self, job_id: str) -> dict:
+        """
+        Aparta el registro de cada PNG del trabajo que ya no existe en Drive y
+        crea una vista previa nueva con las mismas carpetas y opciones.
+        """
+
+        with self._lock:
+            if self._active:
+                raise JobInProgressError()
+
+            sub = self._connected_sub()
+            self._load(sub)
+            job = self._job
+
+            if job is None or job["id"] != job_id or job["status"] != FINISHED:
+                raise PreviewNotUsableError(
+                    "job_not_current",
+                    "Ese trabajo ya no es el vigente. Genere una vista previa nueva.",
+                )
+
+            removed = [
+                item["file_id"] for item in job["summary"]["items"]
+                if item["status"] == REMOVED
+            ]
+
+            if not removed:
+                raise PreviewNotUsableError(
+                    "nothing_to_regenerate",
+                    "Este trabajo no tiene PNG borrados de Drive para volver a generar.",
+                )
+
+            source_id, target_id = job["source"]["id"], job["target"]["id"]
+            options = OutputOptions(**(job.get("options") or {}))
+            files = job.get("files") or {}
+
+        _, write_service = self._connection.services()
+        _, output_dir = folder_dirs(self._settings, sub, source_id)
+        forgotten = 0
+
+        for file_id in removed:
+            output_name = (files.get(file_id) or {}).get("result")
+
+            if not output_name:
+                continue
+
+            path = uploads.ledger_path(output_dir, target_id, output_name)
+            record = _forgettable_record(path, file_id, target_id)
+
+            if record is None or not _gone_from_drive(write_service, record["remote_id"]):
+                continue
+
+            # Apartado y no borrado: el motor solo lee los .json.
+            path.replace(path.with_name(f"{path.name}.borrado-{int(self._now())}"))
+            forgotten += 1
+
+        if not forgotten:
+            raise PreviewNotUsableError(
+                "removed_not_confirmed",
+                "No se pudo confirmar que esos PNG ya no estén en Drive: no se vuelven "
+                "a generar. Si están en la papelera, restáurelos desde allí.",
+            )
+
+        return self._start(PREVIEW, source_id, target_id, None, options)
+
     # Ejecución ----------------------------------------------------------------
 
     def _execute(self, job: dict, sub: str) -> None:
@@ -357,11 +484,17 @@ class JobManager:
                 sync.COMPLETE, sync.PLANNED, sync.FAILED, sync.PENDING, sync.NOT_STARTED,
             )
         }
+        removed = {item.file_id for item in summary.plan if _is_removed(item)}
+        counts[sync.FAILED] -= len(removed)
+        counts[REMOVED] = len(removed)
 
         return {
             "counts": counts,
             "uploaded_now": summary.upload.count(uploads.UPLOADED) if summary.upload else 0,
-            "complete": summary.complete,
+            # Un PNG borrado a propósito no deja el trabajo incompleto.
+            "complete": (
+                stopped is None and counts[sync.FAILED] == 0 and counts[sync.PENDING] == 0
+            ),
             "can_run": _can_run(kind, stopped, counts),
             "stopped": stopped,
             "warnings": list(summary.warnings),
@@ -369,9 +502,9 @@ class JobManager:
                 {
                     "file_id": item.file_id,
                     "name": item.original.name,
-                    "status": item.status,
+                    "status": REMOVED if item.file_id in removed else item.status,
                     "stage": item.stage,
-                    "reason": item.reason,
+                    "reason": None if item.file_id in removed else item.reason,
                     "actions": list(item.actions),
                     "undetermined": list(item.undetermined),
                     "notes": list(item.notes),

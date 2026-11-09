@@ -351,6 +351,28 @@ def create_app(
         except PreviewNotUsableError as exc:
             return _error(409, exc.code, exc.message)
 
+    @app.post("/api/jobs/{job_id}/regenerate")
+    def regenerate(job_id: str = Path(pattern="^[0-9a-f]{32}$")):
+        # Solo PNG que ya no existen en Drive; termina en una vista previa.
+        try:
+            return _public(jobs.regenerate_removed(job_id))
+        except NotConnectedError:
+            return _error(*_NOT_CONNECTED)
+        except JobInProgressError:
+            return _error(*_JOB_IN_PROGRESS)
+        except PreviewNotUsableError as exc:
+            return _error(409, exc.code, exc.message)
+        except Exception as exc:
+            info = describe_error(exc)
+
+            if info is None:
+                raise
+
+            if info.code == RECONNECT_REQUIRED:
+                manager.mark_expired()
+
+            return _error(info.status, info.code, info.message)
+
     if settings.frontend_dist.is_dir():
         app.mount("/", StaticFiles(directory=settings.frontend_dist, html=True))
 

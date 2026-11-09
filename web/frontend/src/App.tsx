@@ -5,6 +5,7 @@ import {
   disconnect,
   getCurrentJob,
   getStatus,
+  regenerateRemoved,
   startConnection,
   startPreview,
   startRun,
@@ -215,6 +216,11 @@ export default function App({
     setOutput(draft);
     closeJob();
   };
+
+  const regenerate = () =>
+    run(async () => {
+      if (job) setJob(await regenerateRemoved(csrf, job.id));
+    });
 
   const execute = () =>
     run(async () => {
@@ -427,7 +433,13 @@ export default function App({
       <main className="stage" aria-label="Vista previa y procesamiento">
         {alert}
         {job ? (
-          <JobPanel job={job} busy={busy} onRun={execute} onClose={closeJob} />
+          <JobPanel
+            job={job}
+            busy={busy}
+            onRun={execute}
+            onClose={closeJob}
+            onRegenerate={regenerate}
+          />
         ) : verification ? (
           <div className="stage-empty">
             <div className="stage-empty-copy">

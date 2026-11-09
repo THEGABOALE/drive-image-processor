@@ -22,6 +22,7 @@ const STATUS_LABELS: Record<JobItem["status"], string> = {
   failed: "Con error",
   pending: "Pendiente de confirmar",
   not_started: "No iniciada",
+  removed: "Borrado de Drive",
 };
 
 const RELATED_LABELS: Record<string, string> = {
@@ -55,6 +56,9 @@ const reasonHint = (reason: string) =>
 
 const imageCount = (count: number) =>
   count === 1 ? "1 imagen" : `${count} imágenes`;
+
+const removedCount = (count: number) =>
+  count === 1 ? "1 borrado de Drive" : `${count} borrados de Drive`;
 
 const comparable = (item: JobItem) => Boolean(item.images?.original && item.images?.result);
 
@@ -170,6 +174,9 @@ function ItemRow({
           )}
         </span>
       </div>
+      {item.status === "removed" && (
+        <p className="item-detail">Se subió antes, pero ya no está en Drive.</p>
+      )}
       {item.reason && <p className="item-detail">{sentence(item.reason)}</p>}
       {hint && <p className="item-detail item-hint">{hint}</p>}
       {item.notes.map((note) => (
@@ -300,17 +307,62 @@ function Progress({ job }: { job: Job }) {
   );
 }
 
-function Summary({ job, busy, onRun }: { job: Job; busy: boolean; onRun: () => void }) {
+/** Al final del resumen: los PNG que se borraron de Drive, y cómo recuperarlos. */
+function RemovedNote({
+  items,
+  busy,
+  onRegenerate,
+}: {
+  items: JobItem[];
+  busy: boolean;
+  onRegenerate: () => void;
+}) {
+  const one = items.length === 1;
+
+  return (
+    <section className="removed-note" aria-labelledby="removed-title">
+      <h3 id="removed-title">PNG borrados de Drive</h3>
+      <p>
+        {one
+          ? "Este PNG se subió antes, pero ya no está en Drive: "
+          : "Estos PNG se subieron antes, pero ya no están en Drive: "}
+        <strong>{items.map((item) => item.name).join(", ")}</strong>. Los PNG borrados de Drive
+        no se vuelven a subir solos, por si los borró a propósito.
+      </p>
+      <div className="removed-actions">
+        <button onClick={onRegenerate} disabled={busy}>
+          {one ? "Volver a generarlo" : "Volver a generarlos"}
+        </button>
+        <p className="hint">Se prepara una vista previa nueva: nada se sube hasta que confirme.</p>
+      </div>
+    </section>
+  );
+}
+
+function Summary({
+  job,
+  busy,
+  onRun,
+  onRegenerate,
+}: {
+  job: Job;
+  busy: boolean;
+  onRun: () => void;
+  onRegenerate: () => void;
+}) {
   const summary = job.summary!;
   const { counts } = summary;
   const toRun = counts.planned + counts.pending;
   const isPreview = job.kind === "preview";
   const unfinished = !isPreview && !summary.complete;
+  const removed = summary.items.filter((item) => item.status === "removed");
   const headline = isPreview
     ? "Así quedaría"
-    : summary.complete
-      ? "Listo: todo quedó en Drive"
-      : "Terminó, pero hay imágenes para revisar";
+    : !summary.complete
+      ? "Terminó, pero hay imágenes para revisar"
+      : removed.length > 0
+        ? "Listo, con una nota"
+        : "Listo: todo quedó en Drive";
 
   const first = summary.items.find(comparable) ?? null;
   const [selectedId, setSelectedId] = useState<string | null>(first?.file_id ?? null);
@@ -349,6 +401,7 @@ function Summary({ job, busy, onRun }: { job: Job; busy: boolean; onRun: () => v
             {counts.not_started === 1 ? "1 no iniciada" : `${counts.not_started} no iniciadas`}
           </li>
         )}
+        {removed.length > 0 && <li className="count">{removedCount(removed.length)}</li>}
       </ul>
 
       {summary.stopped && (
@@ -373,6 +426,10 @@ function Summary({ job, busy, onRun }: { job: Job; busy: boolean; onRun: () => v
           {warning}
         </p>
       ))}
+
+      {removed.length > 0 && (
+        <RemovedNote items={removed} busy={busy} onRegenerate={onRegenerate} />
+      )}
 
       {unfinished && (
         <p>Quedó trabajo sin terminar. Vuelva a generar la vista previa: lo ya hecho no se repite.</p>
@@ -416,15 +473,16 @@ function jobOutcome(job: Job): { text: string; warn: boolean } {
 
   const { counts } = summary;
   const errors = counts.failed + counts.pending + counts.not_started;
+  const removed = counts.removed ? ` · ${removedCount(counts.removed)}` : "";
 
   if (job.kind === "preview") {
     const issues = errors > 0 ? ` · ${imageCount(errors)} con problemas` : "";
-    return { text: `${counts.planned} por procesar${issues}`, warn: errors > 0 };
+    return { text: `${counts.planned} por procesar${issues}${removed}`, warn: errors > 0 };
   }
 
   return summary.complete
-    ? { text: `Todo quedó en Drive: ${imageCount(counts.complete)}`, warn: false }
-    : { text: `Terminó con ${imageCount(errors)} para revisar`, warn: true };
+    ? { text: `Listo: ${imageCount(counts.complete)} en Drive${removed}`, warn: false }
+    : { text: `Terminó con ${imageCount(errors)} para revisar${removed}`, warn: true };
 }
 
 function jobDate(job: Job): string {
@@ -469,11 +527,13 @@ export default function JobPanel({
   busy,
   onRun,
   onClose,
+  onRegenerate,
 }: {
   job: Job;
   busy: boolean;
   onRun: () => void;
   onClose: () => void;
+  onRegenerate: () => void;
 }) {
   return (
     <div className="job">
@@ -496,7 +556,7 @@ export default function JobPanel({
 
       {job.status === "running" && <Progress job={job} />}
       {job.status === "finished" && job.summary && (
-        <Summary job={job} busy={busy} onRun={onRun} key={job.id} />
+        <Summary job={job} busy={busy} onRun={onRun} onRegenerate={onRegenerate} key={job.id} />
       )}
       {job.error && (
         <p className="alert" role="alert">

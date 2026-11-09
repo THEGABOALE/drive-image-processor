@@ -51,7 +51,8 @@ export type StageProgress = { done: number; failed: number };
 export type JobItem = {
   file_id: string;
   name: string;
-  status: "complete" | "planned" | "failed" | "pending" | "not_started";
+  // removed: un PNG subido antes que ya no está en Drive (se borró).
+  status: "complete" | "planned" | "failed" | "pending" | "not_started" | "removed";
   stage: "download" | "processing" | "upload" | null;
   reason: string | null;
   actions: string[];
@@ -80,7 +81,8 @@ export type Job = {
     upload: StageProgress;
   };
   summary: {
-    counts: Record<JobItem["status"], number>;
+    // removed falta en los trabajos guardados antes de existir.
+    counts: Record<Exclude<JobItem["status"], "removed">, number> & { removed?: number };
     uploaded_now: number;
     complete: boolean;
     can_run: boolean;
@@ -182,3 +184,8 @@ export const startPreview = (
 // Las carpetas salen de la vista previa: esta solicitud no las envía.
 export const startRun = (csrf: string, previewId: string) =>
   post<Job>(`/api/jobs/${previewId}/run`, csrf);
+
+// Vuelve a generar los PNG del trabajo que se borraron de Drive: el backend
+// lo confirma con Drive y responde con una vista previa nueva.
+export const regenerateRemoved = (csrf: string, jobId: string) =>
+  post<Job>(`/api/jobs/${jobId}/regenerate`, csrf);

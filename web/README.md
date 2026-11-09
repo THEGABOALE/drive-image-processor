@@ -147,6 +147,14 @@ nuevo se retoma sin duplicar.
 Usa los valores del motor: 400×400, fondo blanco y todas las imágenes de la carpeta.
 Los originales nunca se modifican ni se borran.
 
+**PNG borrados de Drive.** Si un PNG que la aplicación subió se borra definitivamente
+de Drive, el motor no lo vuelve a subir solo, por si se borró a propósito. El resumen
+lo muestra como una nota ("Borrado de Drive"), no como un error, con el botón
+**Volver a generarlo**. El backend confirma con Drive que el PNG ya no existe (solo
+lectura), aparta el registro local de esa subida (lo renombra a `*.json.borrado-<fecha>`,
+no lo borra) y crea una vista previa nueva: nada se sube hasta confirmar. Un PNG que
+sigue en la papelera no cuenta como borrado: se restaura desde la papelera de Drive.
+
 **Limitación.** El motor rehace el plan al ejecutar: lo que se agregue a la carpeta
 después de la vista previa también se procesa. Por eso la vista previa vence.
 
