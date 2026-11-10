@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { nameLength } from "./Job";
 import type { Job, JobItem } from "./api";
 
 const ACCOUNT = { sub: "sub-a", email: "prueba@example.com", display_name: "Prueba" };
@@ -1521,5 +1522,15 @@ describe("PNG borrados de Drive", () => {
 
     const last = await screen.findByRole("region", { name: /último trabajo/i });
     expect(last.textContent).toMatch(/1 borrado de Drive/);
+  });
+});
+
+describe("nombres como titular", () => {
+  it("un nombre largo baja de escala para no ocupar la pantalla", () => {
+    expect(nameLength("Fotos producto")).toBe("short");
+    expect(nameLength("x".repeat(20))).toBe("short");
+    expect(nameLength("x".repeat(21))).toBe("medium");
+    expect(nameLength("x".repeat(40))).toBe("medium");
+    expect(nameLength("Catálogo primavera 2026 — fotos originales del estudio")).toBe("long");
   });
 });

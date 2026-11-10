@@ -60,6 +60,13 @@ const imageCount = (count: number) =>
 const removedCount = (count: number) =>
   count === 1 ? "1 borrado de Drive" : `${count} borrados de Drive`;
 
+/**
+ * El tamaño de un nombre puesto como titular: uno largo baja de escala para
+ * no ocupar la pantalla entera.
+ */
+export const nameLength = (name: string) =>
+  name.length > 40 ? "long" : name.length > 20 ? "medium" : "short";
+
 const comparable = (item: JobItem) => Boolean(item.images?.original && item.images?.result);
 
 const prefersReducedMotion = () =>
@@ -434,7 +441,10 @@ function Summary({
   );
 
   return (
-    <div className={selected ? "summary" : "summary no-view"}>
+    <div
+      className={selected ? "summary" : "summary no-view"}
+      style={{ ["--ratio" as string]: String(job.options ? job.options.width / job.options.height : 1) }}
+    >
       {selected && (
         <div className="summary-view">
           <Compare job={job} item={selected} key={selected.file_id} />
@@ -528,9 +538,14 @@ function jobDate(job: Job): string {
 
 /** De qué carpeta a cuál, en grande: lo primero que se lee del trabajo. */
 function JobRoute({ job }: { job: Job }) {
+  const source = job.source.name ?? "";
+  const target = job.target.name ?? "";
+  const longest = job.same_folder || source.length >= target.length ? source : target;
+  const classes = `job-folders job-route ${nameLength(longest)}`;
+
   if (job.same_folder) {
     return (
-      <p className="job-folders job-route">
+      <p className={classes}>
         <span className="visually-hidden">Carpeta: </span>
         <span className="job-route-name">{job.source.name}</span>
       </p>
@@ -538,7 +553,7 @@ function JobRoute({ job }: { job: Job }) {
   }
 
   return (
-    <p className="job-folders job-route">
+    <p className={classes}>
       <span className="visually-hidden">De </span>
       <span className="job-route-name">{job.source.name}</span>
       <span className="visually-hidden"> a </span>

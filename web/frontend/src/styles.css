@@ -164,9 +164,10 @@ body.resizing * {
 .badge {
   display: inline-block;
   padding: 0.15rem 0.5rem;
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius-control);
-  background: var(--signal);
-  color: var(--signal-ink);
+  background: var(--panel);
+  color: var(--ink);
   font-size: 0.75rem;
   font-weight: 700;
 }
@@ -232,15 +233,14 @@ button.ghost[aria-pressed="true"] {
 
 /* Deshabilitado: el contorno queda, el color se va. Nunca un amarillo lavado. */
 button:disabled {
-  border-style: dashed;
-  border-color: var(--line-strong);
+  border-color: var(--line);
   background: transparent;
   color: var(--muted);
   cursor: not-allowed;
 }
 
 button.primary:disabled {
-  border-color: var(--line-strong);
+  border-color: var(--line);
   background: transparent;
   color: var(--muted);
 }
@@ -281,6 +281,8 @@ button.primary:disabled {
 
 .welcome-body {
   display: grid;
+  width: 100%;
+  max-width: 112rem;
   grid-template-columns: minmax(0, 6fr) minmax(0, 5fr);
   align-items: center;
   gap: clamp(1.5rem, 4vw, 4rem);
@@ -294,8 +296,8 @@ button.primary:disabled {
 
 /* El titular, directo sobre el gris: blanco expandido, grande. */
 .welcome-copy h1 {
-  max-width: 13ch;
-  font-size: var(--display);
+  max-width: 12ch;
+  font-size: clamp(2.25rem, 1rem + 4vw, 6.5rem);
   font-weight: 850;
   font-stretch: 125%;
   line-height: 0.95;
@@ -305,7 +307,7 @@ button.primary:disabled {
 .welcome-panel {
   display: grid;
   gap: 1.1rem;
-  max-width: 34rem;
+  max-width: 36rem;
   padding: 1.25rem 1.4rem 1.4rem;
   border-radius: var(--radius-panel);
   background: var(--panel);
@@ -648,9 +650,9 @@ body.resizing .rail-handle::after {
   place-items: center;
   width: 2.1rem;
   height: 2.1rem;
+  border: 2px solid var(--ink);
   border-radius: 999px;
-  background: var(--signal);
-  color: var(--signal-ink);
+  color: var(--ink);
   font-weight: 800;
 }
 
@@ -709,7 +711,7 @@ body.resizing .rail-handle::after {
 }
 
 .slot.chosen .folder-icon {
-  background: var(--signal);
+  background: var(--ink);
 }
 
 .folder-name {
@@ -890,7 +892,7 @@ body.resizing .rail-handle::after {
 /* Inicio: el recorrido manda; la nota y el último trabajo, al costado. */
 .stage-start {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(16rem, 22rem);
+  grid-template-columns: minmax(0, 60rem) minmax(16rem, 22rem);
   align-items: start;
   align-content: center;
   gap: 1.5rem clamp(1.5rem, 3vw, 3rem);
@@ -900,8 +902,12 @@ body.resizing .rail-handle::after {
 
 /* Con las carpetas listas: el lienzo grande, la nota al costado. */
 .stage-ready {
+  --sample-height: min(68vh, 44rem);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(16rem, 22rem);
+  grid-template-columns:
+    min(calc(100% - 23.5rem), max(20rem, calc(var(--sample-height) * var(--ratio, 1))))
+    minmax(16rem, 22rem);
+  justify-content: start;
   align-items: start;
   gap: 1.5rem clamp(1.5rem, 3vw, 3rem);
   padding-top: 0.5rem;
@@ -948,6 +954,24 @@ body.resizing .rail-handle::after {
   line-height: 0.98;
   letter-spacing: -0.02em;
   overflow-wrap: anywhere;
+}
+
+.route-name.medium {
+  font-size: clamp(1.9rem, 0.7rem + 3.2vw, 4.5rem);
+}
+
+.route-name.long {
+  font-size: clamp(1.6rem, 0.6rem + 2.2vw, 3.25rem);
+  line-height: 1.04;
+}
+
+/* Un nombre nunca ocupa más de tres líneas: el completo está en el panel. */
+.route-name,
+.job-route-name {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
 }
 
 /* Sin elegir: grafito sobre gris, un hueco por llenar. */
@@ -1153,6 +1177,15 @@ body.resizing .rail-handle::after {
   letter-spacing: -0.02em;
 }
 
+.job-route.medium {
+  font-size: clamp(1.6rem, 0.8rem + 2vw, 3rem);
+}
+
+.job-route.long {
+  font-size: clamp(1.35rem, 0.75rem + 1.3vw, 2.25rem);
+  line-height: 1.05;
+}
+
 .job-route-name {
   overflow-wrap: anywhere;
 }
@@ -1196,8 +1229,12 @@ body.resizing .rail-handle::after {
 
 /* Resumen: la foto a la izquierda, la cuenta a la derecha, la lista debajo. */
 .summary {
+  --view-height: min(68vh, 46rem);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(15rem, 20rem);
+  grid-template-columns:
+    min(calc(100% - 21.25rem), max(26rem, calc(var(--view-height) * var(--ratio, 1))))
+    minmax(15rem, 20rem);
+  justify-content: start;
   grid-template-areas:
     "view tally"
     "list list";
@@ -1487,9 +1524,9 @@ body.resizing .rail-handle::after {
 
 .compare-frame {
   position: relative;
-  width: min(100%, calc(min(68vh, 46rem) * var(--ratio, 1)));
+  width: min(100%, calc(var(--view-height, min(68vh, 46rem)) * var(--ratio, 1)));
   aspect-ratio: var(--ratio, 1);
-  max-height: min(68vh, 46rem);
+  max-height: var(--view-height, min(68vh, 46rem));
   border-radius: 2px;
   background: #ffffff;
   outline: 1px solid var(--stage-deep);
@@ -1774,7 +1811,22 @@ body.resizing .rail-handle::after {
     padding-block: 0.5rem 1rem;
   }
 
-  /* Con una foto que mirar, la foto va primero. */
+  /* Con una foto que mirar, la foto va primero, debajo de la marca. Las
+     partes del panel pasan a ser paneles sueltos para poder ordenarlas. */
+  .shell.has-work .rail {
+    display: contents;
+  }
+
+  .shell.has-work .rail > * {
+    border-top: 0;
+    border-radius: var(--radius-panel);
+    background: var(--panel);
+  }
+
+  .shell.has-work .rail-top {
+    order: -2;
+  }
+
   .shell.has-work .stage {
     order: -1;
   }

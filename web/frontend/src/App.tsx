@@ -21,7 +21,7 @@ import {
   type PickedFolder,
   type PickerConfig,
 } from "./google/picker";
-import JobPanel, { LastJob } from "./Job";
+import JobPanel, { LastJob, nameLength } from "./Job";
 import SampleCanvas from "./Sample";
 import OutputForm, { draftFrom, optionsFrom, outputProblem, type OutputDraft } from "./Output";
 import "./styles.css";
@@ -446,7 +446,14 @@ export default function App({
             onRegenerate={regenerate}
           />
         ) : verification ? (
-          <div className="stage-ready">
+          <div
+            className="stage-ready"
+            style={
+              output && !problem_
+                ? { ["--ratio" as string]: String(Number(output.width) / Number(output.height)) }
+                : undefined
+            }
+          >
             {output && !problem_ && <SampleCanvas options={optionsFrom(output)} />}
             <div className="stage-side">
               <div className="stage-note">
@@ -712,7 +719,7 @@ function RouteStop({
         <span className="route-label">{label}</span>
         <span className="route-detail">{detail}</span>
       </span>
-      <span className={folder ? "route-name" : "route-name empty"}>
+      <span className={["route-name", folder ? nameLength(folder.name) : "empty"].join(" ")}>
         {folder ? folder.name : "Sin elegir"}
       </span>
     </div>
