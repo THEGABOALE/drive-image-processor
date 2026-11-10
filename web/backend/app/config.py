@@ -77,6 +77,8 @@ class Settings:
     allowed_origins: frozenset[str]
     app_url: str
     frontend_dist: Path
+    # Corre como el ejecutable empaquetado, que se entrega a otras personas.
+    packaged: bool = False
 
 
 def ensure_loopback(host: str) -> str:
@@ -175,6 +177,7 @@ def load_settings(environ=None, env_file: Path | None = None) -> Settings:
         )
 
     development = environment == "development"
+    packaged = values.get(PACKAGED_VARIABLE) == "1"
     origins = {LOCAL_ORIGIN}
     hosts = {f"localhost:{PORT}"}
 
@@ -199,8 +202,9 @@ def load_settings(environ=None, env_file: Path | None = None) -> Settings:
         # El paquete no tiene Vite: siempre abre la página del propio servidor.
         app_url=(
             DEV_FRONTEND_ORIGIN
-            if development and values.get(PACKAGED_VARIABLE) != "1"
+            if development and not packaged
             else LOCAL_ORIGIN
         ),
         frontend_dist=BACKEND_DIR.parent / "frontend" / "dist",
+        packaged=packaged,
     )

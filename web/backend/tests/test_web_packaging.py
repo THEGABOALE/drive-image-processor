@@ -48,6 +48,8 @@ def test_development_configuration_is_allowed_with_a_warning(tmp_path):
 
     assert checked.environment == "development"
     assert "usuarios de prueba" in checked.warning
+    # El proyecto de desarrollo puede estar publicado: no se afirma que no lo esté.
+    assert "modo de prueba" in checked.warning
 
 
 @pytest.mark.parametrize(
@@ -145,6 +147,29 @@ def test_assemble_copies_config_model_and_readme(tmp_path):
     readme = (program / "LEEME.txt").read_text(encoding="utf-8")
     assert "DriveImageProcessor.exe" in readme
     assert "no está verificada" in readme
+
+
+def test_development_readme_only_asks_for_access_when_google_blocks_the_account(tmp_path):
+    program = fake_program(tmp_path)
+    model = tmp_path / "m.onnx"
+    model.write_bytes(b"x")
+
+    build.assemble(program, build.check_config(config_dir(tmp_path, "development")), model,
+                   "isnet-general-use")
+
+    readme = (program / "LEEME.txt").read_text(encoding="utf-8")
+    assert "solo funciona con las cuentas" not in readme
+    assert "usuario de prueba" in readme
+
+
+def test_production_readme_has_no_test_user_note(tmp_path):
+    program = fake_program(tmp_path)
+    model = tmp_path / "m.onnx"
+    model.write_bytes(b"x")
+
+    build.assemble(program, build.check_config(config_dir(tmp_path)), model, "isnet-general-use")
+
+    assert "usuario de prueba" not in (program / "LEEME.txt").read_text(encoding="utf-8")
 
 
 def test_readme_describes_the_current_application():

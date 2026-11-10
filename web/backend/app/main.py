@@ -179,6 +179,7 @@ def create_app(
     def status():
         return {
             "environment": settings.environment,
+            "packaged": settings.packaged,
             "csrf_token": csrf_token,
             "connection": _status_json(manager),
             "picker": {

@@ -13,9 +13,10 @@ type Connection = {
   account?: typeof ACCOUNT | null;
 };
 
-function statusBody(connection: Connection, environment = "development") {
+function statusBody(connection: Connection, environment = "development", packaged = false) {
   return {
     environment,
+    packaged,
     csrf_token: CSRF,
     connection: { message: null, error: null, account: null, ...connection },
     picker: { client_id: "123-web", api_key: "clave", project_number: "123" },
@@ -28,6 +29,7 @@ function mockApi(
   initial: Connection,
   routes: Record<string, () => { status?: number; body: unknown }> = {},
   environment = "development",
+  packaged = false,
 ) {
   const calls: Call[] = [];
   const server = { connection: initial };
@@ -39,7 +41,7 @@ function mockApi(
       const route = routes[url];
       const reply = route
         ? route()
-        : { body: statusBody(server.connection, environment) };
+        : { body: statusBody(server.connection, environment, packaged) };
       return {
         ok: (reply.status ?? 200) < 400,
         status: reply.status ?? 200,
@@ -112,6 +114,13 @@ describe("estado de conexión", () => {
     cleanup();
 
     mockApi({ state: "disconnected" }, {}, "production");
+    renderApp();
+    await screen.findByRole("button", { name: /conectar google drive/i });
+    expect(screen.queryByText(/desarrollo/i)).toBeNull();
+  });
+
+  it("no indica desarrollo en el programa empaquetado, que recibe otra persona", async () => {
+    mockApi({ state: "disconnected" }, {}, "development", true);
     renderApp();
     await screen.findByRole("button", { name: /conectar google drive/i });
     expect(screen.queryByText(/desarrollo/i)).toBeNull();

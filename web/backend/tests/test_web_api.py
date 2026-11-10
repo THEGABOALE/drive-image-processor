@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 
 import pytest
@@ -34,8 +35,19 @@ def test_status_disconnected(settings, make_manager, make_client):
     body = make_client(settings, make_manager()).get("/api/status").json()
 
     assert body["environment"] == "development"
+    assert body["packaged"] is False
     assert body["connection"]["state"] == "disconnected"
     assert body["connection"]["account"] is None
+
+
+def test_status_says_when_it_runs_as_the_packaged_program(
+    settings, make_manager, make_client
+):
+    packaged = dataclasses.replace(settings, packaged=True)
+
+    body = make_client(packaged, make_manager()).get("/api/status").json()
+
+    assert body["packaged"] is True
 
 
 def test_status_connected_shows_sub_and_public_picker_config(

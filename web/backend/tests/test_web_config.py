@@ -44,8 +44,14 @@ def test_packaged_development_opens_the_local_page(make_environ, tmp_path):
     settings = load(make_environ("development", DIP_PACKAGED="1"), tmp_path)
 
     assert settings.app_url == "http://localhost:8000"
+    assert settings.packaged
     # Los orígenes de desarrollo no cambian.
     assert "http://localhost:5173" in settings.allowed_origins
+
+
+def test_running_from_the_repository_is_not_packaged(make_environ, tmp_path):
+    assert not load(make_environ("development"), tmp_path).packaged
+    assert not load(make_environ("development", DIP_PACKAGED="0"), tmp_path).packaged
 
 
 def test_unknown_environment_is_rejected(make_environ, tmp_path):

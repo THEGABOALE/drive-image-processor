@@ -34,6 +34,8 @@ export type OutputOptions = { width: number; height: number; background: string 
 
 export type Status = {
   environment: "development" | "production";
+  // El ejecutable empaquetado, que se entrega a otras personas.
+  packaged?: boolean;
   csrf_token: string;
   connection: Connection;
   picker: PickerConfig;

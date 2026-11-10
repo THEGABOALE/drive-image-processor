@@ -232,7 +232,8 @@ export default function App({
 
   const connected = connection?.state === "connected";
   const accountName = connection?.account?.display_name || connection?.account?.email || "";
-  const development = status?.environment === "development";
+  // La etiqueta es para quien desarrolla; el ejecutable se entrega a otras personas.
+  const development = status?.environment === "development" && !status.packaged;
   const alert = (problem || connectionAlert) && (
     <p className="alert" role="alert">
       {problem ?? connectionAlert}

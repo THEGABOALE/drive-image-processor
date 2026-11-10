@@ -104,8 +104,8 @@ def check_config(folder: Path) -> CheckedConfig:
 
     if settings.environment == "development":
         warning = (
-            "Configuración de desarrollo: el ejecutable solo funcionará para los "
-            "usuarios de prueba del proyecto."
+            "Configuración de desarrollo: si el proyecto de Google Cloud sigue en "
+            "modo de prueba, el ejecutable solo funcionará para sus usuarios de prueba."
         )
 
     return CheckedConfig(settings.environment, client_file, selected, warning)
@@ -180,9 +180,10 @@ def assemble(program: Path, config: CheckedConfig, model: Path, model_name: str)
     readme = (PACKAGING / "LEEME.txt").read_text(encoding="utf-8")
 
     if config.environment == "development":
+        # El proyecto puede estar publicado o en modo de prueba: no se sabe aquí.
         readme += (
-            "\nVersión de desarrollo: solo funciona con las cuentas agregadas como "
-            "usuarios de prueba del proyecto de Google Cloud.\n"
+            "\nSi Google bloquea su cuenta al conectarla, pídale a quien le envió el "
+            "programa que la agregue como usuario de prueba.\n"
         )
 
     (program / "LEEME.txt").write_text(readme, encoding="utf-8")
