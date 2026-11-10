@@ -357,7 +357,7 @@ button.primary:disabled {
 .comparison {
   position: relative;
   margin: 0;
-  aspect-ratio: 4 / 5;
+  aspect-ratio: 1 / 1;
   max-height: 78vh;
   border-radius: 2px;
   overflow: hidden;
@@ -373,12 +373,7 @@ button.primary:disabled {
   place-items: center;
 }
 
-/* Un estudio improvisado: pared, piso y luz de ventana. */
 .comparison-before {
-  background:
-    radial-gradient(60% 50% at 20% 18%, oklch(0.9 0.05 85 / 0.9), transparent 70%),
-    radial-gradient(45% 40% at 85% 30%, oklch(0.72 0.06 150 / 0.7), transparent 70%),
-    linear-gradient(to bottom, oklch(0.78 0.03 60) 0 62%, oklch(0.55 0.05 50) 62% 100%);
   clip-path: inset(0 calc(100% - var(--split)) 0 0);
 }
 
@@ -394,38 +389,11 @@ button.primary:disabled {
   clip-path: inset(0 0 0 var(--split));
 }
 
-/* Un frasco: cuerpo, etiqueta y tapa. */
-.demo-product {
-  position: relative;
-  width: 26%;
-  aspect-ratio: 3 / 5;
-  border-radius: 22% 22% 16% 16% / 12% 12% 8% 8%;
-  background: linear-gradient(100deg, oklch(0.4 0.1 255), oklch(0.56 0.13 255) 45%, oklch(0.38 0.09 255));
-  box-shadow: 0 18px 12px -14px oklch(0.2 0.03 60 / 0.55);
-  transform: translateY(6%);
-}
-
-.demo-product::before {
-  content: "";
-  position: absolute;
-  left: 22%;
-  right: 22%;
-  top: -9%;
-  height: 11%;
-  border-radius: 3px 3px 1px 1px;
-  background: oklch(0.25 0.01 255);
-}
-
-.demo-product::after {
-  content: "";
-  position: absolute;
-  inset: 38% 10% 30%;
-  border-radius: 3px;
-  background: oklch(0.96 0.02 90);
-}
-
-.comparison-after .demo-product {
-  box-shadow: none;
+/* Las dos fotos tienen el mismo tamaño: cubren el recuadro igual y calzan. */
+.comparison-scene img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .comparison-handle {
@@ -1780,7 +1748,6 @@ body.resizing .rail-handle::after {
   .comparison {
     order: -1;
     width: min(100%, 26rem);
-    aspect-ratio: 5 / 4;
   }
 
   .shell {

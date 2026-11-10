@@ -99,6 +99,19 @@ describe("estado de conexión", () => {
     expect(screen.queryByRole("button", { name: /elegir carpeta de origen/i })).toBeNull();
   });
 
+  it("el ejemplo de la portada es una foto real y el recorte que hizo DIPS", async () => {
+    mockApi({ state: "disconnected" });
+    renderApp();
+
+    const example = await screen.findByRole("figure", { name: /con su fondo y sin él/i });
+    const sources = Array.from(example.querySelectorAll("img")).map((img) => img.getAttribute("src"));
+    expect(sources).toHaveLength(2);
+    expect(sources[0]).toMatch(/ejemplo-original\.webp$/);
+    expect(sources[1]).toMatch(/ejemplo-resultado\.webp$/);
+    // Ya no es un dibujo hecho con CSS.
+    expect(example.querySelector(".demo-product")).toBeNull();
+  });
+
   it("conectada muestra la cuenta y permite desconectar", async () => {
     mockApi({ state: "connected", account: ACCOUNT });
     renderApp();

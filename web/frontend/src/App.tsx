@@ -24,6 +24,8 @@ import {
 import JobPanel, { LastJob, nameLength } from "./Job";
 import SampleCanvas from "./Sample";
 import OutputForm, { draftFrom, optionsFrom, outputProblem, type OutputDraft } from "./Output";
+import exampleOriginal from "./assets/ejemplo-original.webp";
+import exampleResult from "./assets/ejemplo-resultado.webp";
 import "./styles.css";
 
 type PickerLike = Pick<GooglePicker, "pick" | "forget">;
@@ -579,15 +581,18 @@ function RailHandle({ width, onChange }: { width: number; onChange: (value: numb
   );
 }
 
-/** Antes y después: el mismo producto, con su fondo y sin él. */
+/**
+ * Antes y después: una foto real y el recorte que hizo el propio DIPS, sin
+ * retocar. Las dos imágenes tienen el mismo tamaño, así que calzan al cortar.
+ */
 function Comparison() {
   return (
     <figure className="comparison" aria-label="Ejemplo: la misma foto con su fondo y sin él">
       <div className="comparison-scene comparison-before" aria-hidden="true">
-        <span className="demo-product" />
+        <img src={exampleOriginal} alt="" width={736} height={736} decoding="async" />
       </div>
       <div className="comparison-scene comparison-after" aria-hidden="true">
-        <span className="demo-product" />
+        <img src={exampleResult} alt="" width={736} height={736} decoding="async" />
       </div>
       <span className="comparison-handle" aria-hidden="true" />
       <figcaption>
