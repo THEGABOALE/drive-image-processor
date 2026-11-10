@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacidad · DIPS</title>
+  <meta name="description" content="Qué datos de Google usa DIPS, dónde quedan y cómo eliminarlos.">
+  <link rel="stylesheet" href="estilo.css">
+</head>
+<body>
+  <div class="page">
+    <aside class="side">
+      <a class="brand" href="./">DIPS<small>Drive Image Processing Service</small></a>
+      <nav aria-label="Páginas">
+        <a href="./">Inicio</a>
+        <a href="privacidad.html" aria-current="page">Privacidad</a>
+      </nav>
+    </aside>
+
+    <main>
+      <h1>Política de privacidad</h1>
+      <p class="updated">Última actualización: 10 de noviembre de 2026</p>
+      <p class="lead">
+        DIPS (Drive Image Processing Service) es un programa que se instala y se ejecuta en su
+        computadora. Quien lo desarrolla no opera servidores para DIPS y no recibe sus fotos, sus
+        archivos ni los datos de su cuenta.
+      </p>
+
+      <h2>Datos de Google que usa</h2>
+      <p>Al conectar su cuenta, DIPS pide estos permisos:</p>
+      <ul>
+        <li>
+          <strong>Ver los archivos de Google Drive</strong>
+          (<code>drive.readonly</code>): para listar y descargar las fotos de la carpeta de origen
+          que usted elige, y comprobar los nombres de las carpetas. Este permiso no permite modificar
+          ni borrar archivos.
+        </li>
+        <li>
+          <strong>Crear archivos en Google Drive</strong>
+          (<code>drive.file</code>): para guardar los PNG resultantes en la carpeta de destino. Solo
+          da acceso a los archivos que el propio DIPS crea.
+        </li>
+        <li>
+          <strong>Identificador de la cuenta</strong> (<code>openid</code>): un identificador
+          estable que Google asigna a la cuenta, usado para no mezclar los trabajos de distintas
+          cuentas en el mismo equipo. DIPS no pide su nombre ni su foto de perfil. El correo que
+          muestra la aplicación lo informa Drive y solo se muestra en pantalla.
+        </li>
+      </ul>
+      <p>
+        Las carpetas se eligen con el selector de Google (Google Picker) en su navegador; DIPS
+        solo trabaja con las carpetas que usted selecciona.
+      </p>
+
+      <h2>Cómo se usan</h2>
+      <ul>
+        <li>Las fotos se descargan a su computadora, se les quita el fondo allí mismo con un modelo
+          de inteligencia artificial incluido en el programa, y el resultado se sube a su Drive.</li>
+        <li>Las fotos y los datos de Google no se envían a ningún otro servicio ni a quien desarrolla
+          DIPS, no se venden, no se usan para publicidad y no se usan para entrenar modelos.</li>
+        <li>DIPS no incluye analítica, rastreo ni registros que salgan de su equipo.</li>
+      </ul>
+
+      <h2>Qué queda guardado en su equipo</h2>
+      <ul>
+        <li>La autorización de Google, cifrada con la protección de datos de Windows de su usuario,
+          en <code>%LOCALAPPDATA%\DriveImageProcessor</code>.</li>
+        <li>Copias de trabajo de las fotos descargadas y de los PNG generados, en esa misma carpeta,
+          para no repetir trabajo en la siguiente ejecución.</li>
+      </ul>
+      <p>Nada de esto se comparte. Usted puede borrarlo en cualquier momento.</p>
+
+      <h2>Cómo eliminar sus datos y revocar el acceso</h2>
+      <ol>
+        <li>En DIPS, pulse «Desconectar»: borra la autorización guardada en su equipo.</li>
+        <li>Borre la carpeta <code>%LOCALAPPDATA%\DriveImageProcessor</code> para eliminar las
+          copias de trabajo.</li>
+        <li>Para quitar el permiso en Google, vaya a
+          <a href="https://myaccount.google.com/connections">myaccount.google.com/connections</a>
+          y elimine el acceso de la app.</li>
+      </ol>
+      <p>Los PNG creados en su Drive son suyos: puede conservarlos o borrarlos desde Drive.</p>
+
+      <h2>Uso limitado</h2>
+      <p>
+        El uso y la transferencia a cualquier otra aplicación de la información recibida de las API
+        de Google cumplirán la
+        <a href="https://developers.google.com/terms/api-services-user-data-policy">Política de
+        Datos del Usuario de los Servicios de las API de Google</a>, incluidos los requisitos de Uso
+        Limitado.
+      </p>
+
+      <h2>Cambios y contacto</h2>
+      <p>
+        Si esta política cambia, se actualizará esta página y su fecha. Para preguntas, abra un
+        reporte en
+        <a href="https://github.com/THEGABOALE/drive-image-processor/issues">github.com/THEGABOALE/drive-image-processor/issues</a>.
+      </p>
+    </main>
+  </div>
+</body>
+</html>

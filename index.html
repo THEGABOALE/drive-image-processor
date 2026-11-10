@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DIPS · Drive Image Processing Service</title>
+  <meta name="description" content="Programa para Windows que quita el fondo de las fotos de una carpeta de Google Drive y guarda los PNG en Drive.">
+  <link rel="stylesheet" href="estilo.css">
+</head>
+<body>
+  <div class="page">
+    <aside class="side">
+      <a class="brand" href="./">DIPS<small>Drive Image Processing Service</small></a>
+      <nav aria-label="Páginas">
+        <a href="./" aria-current="page">Inicio</a>
+        <a href="privacidad.html">Privacidad</a>
+      </nav>
+    </aside>
+
+    <main>
+      <h1>Fotos de Drive, sin fondo.</h1>
+      <p class="lead">
+        DIPS es un programa para Windows que toma las fotos de una carpeta de Google Drive,
+        les quita el fondo en su propio equipo y guarda los resultados como PNG en Drive.
+      </p>
+
+      <ul class="facts">
+        <li><strong>Corre en su equipo</strong>El procesamiento ocurre en su computadora, no en un servidor.</li>
+        <li><strong>Usted elige las carpetas</strong>Solo trabaja con la carpeta de origen y la de destino que usted selecciona.</li>
+        <li><strong>No borra ni cambia sus fotos</strong>Los originales quedan intactos; solo se crean archivos PNG nuevos.</li>
+      </ul>
+
+      <h2>Cómo funciona</h2>
+      <ol>
+        <li>Abra <code>DriveImageProcessor.exe</code>: se abre una página local en su navegador.</li>
+        <li>Conecte su cuenta de Google y elija la carpeta con las fotos y la carpeta donde guardar los resultados.</li>
+        <li>Revise la vista previa con el tamaño y el fondo elegidos (blanco o transparente).</li>
+        <li>Confirme el procesamiento: los PNG aparecen en la carpeta de destino.</li>
+      </ol>
+
+      <h2>Permisos de Google</h2>
+      <p>
+        DIPS pide permiso para <strong>ver</strong> los archivos de Drive (para leer las fotos de la
+        carpeta que usted elige) y para <strong>crear</strong> archivos (los PNG resultantes). No pide
+        permiso para modificar ni borrar sus archivos. El detalle está en la
+        <a href="privacidad.html">política de privacidad</a>.
+      </p>
+
+      <h2>Aviso de app no verificada</h2>
+      <p>
+        DIPS es un proyecto personal que no pasó por la verificación de Google. Al conectar la cuenta,
+        Google muestra un aviso; para continuar, pulse «Configuración avanzada» y luego «Ir a DIPS».
+      </p>
+
+      <footer class="foot">
+        Código fuente y contacto:
+        <a href="https://github.com/THEGABOALE/drive-image-processor">github.com/THEGABOALE/drive-image-processor</a>
+      </footer>
+    </main>
+  </div>
+</body>
+</html>
