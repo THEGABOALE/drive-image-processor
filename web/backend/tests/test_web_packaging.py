@@ -147,6 +147,17 @@ def test_assemble_copies_config_model_and_readme(tmp_path):
     assert "no está verificada" in readme
 
 
+def test_readme_describes_the_current_application():
+    # Lo lee quien recibe el .zip: el tamaño y el fondo ya no son fijos.
+    readme = (REPO / "web" / "packaging" / "LEEME.txt").read_text(encoding="utf-8")
+    text = readme.lower()
+
+    assert "400x400, fondo blanco)" not in text
+    assert "tamaño" in text and "transparente" in text
+    assert "vista previa" in text
+    assert "volver a generar" in text
+
+
 def test_only_the_needed_configuration_is_copied(tmp_path):
     program = fake_program(tmp_path)
     folder = config_dir(tmp_path)
