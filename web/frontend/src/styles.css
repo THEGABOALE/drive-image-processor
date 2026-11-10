@@ -745,6 +745,20 @@ body.resizing .rail-handle::after {
   color: var(--muted);
 }
 
+/* El número se arrastra a los lados; con el campo abierto, se escribe. */
+.field input.scrub {
+  touch-action: pan-y;
+}
+
+.field input.scrub:not(:focus):not(:disabled) {
+  cursor: ew-resize;
+}
+
+.field input.scrub.dragging {
+  border-color: var(--signal);
+  user-select: none;
+}
+
 .backgrounds {
   display: flex;
   flex-wrap: wrap;
@@ -807,12 +821,6 @@ body.resizing .rail-handle::after {
     0 0,
     5px 5px;
   background-size: 10px 10px;
-}
-
-.field-error {
-  color: var(--danger);
-  font-size: var(--text-small);
-  font-weight: 600;
 }
 
 /* Escenario ----------------------------------------------------------------- */

@@ -4,6 +4,18 @@ import App from "./App";
 import { nameLength } from "./Job";
 import type { Job, JobItem } from "./api";
 
+// jsdom no trae PointerEvent: sin esto, los eventos de puntero llegan sin clientX.
+if (!("PointerEvent" in window)) {
+  class TestPointerEvent extends MouseEvent {
+    pointerId: number;
+    constructor(type: string, init: PointerEventInit = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId ?? 0;
+    }
+  }
+  Object.assign(window, { PointerEvent: TestPointerEvent });
+}
+
 const ACCOUNT = { sub: "sub-a", email: "prueba@example.com", display_name: "Prueba" };
 const CSRF = "token-csrf-de-prueba";
 const JOB_ID = "a".repeat(32);
@@ -742,22 +754,135 @@ describe("tamaño y fondo del resultado", () => {
     });
   });
 
+  // Los límites no se reclaman con un error: el valor se ajusta solo.
+  const noRangeError = () =>
+    expect(screen.queryByText(/debe estar entre|número entero|no puede superar/i)).toBeNull();
+
+  it("un lado mayor que el máximo baja al máximo apenas se escribe", async () => {
+    await ready();
+
+    fireEvent.change(width(), { target: { value: "6001" } });
+
+    expect(width().value).toBe("6000");
+    noRangeError();
+  });
+
   it.each([
-    ["un lado menor que el mínimo", "63", "400", /entre 64 y 6000/],
-    ["un lado mayor que el máximo", "400", "6001", /entre 64 y 6000/],
-    ["un número con decimales", "400.5", "400", /número entero/],
-    ["un campo vacío", "", "400", /número entero/],
-    ["demasiados píxeles", "5000", "5000", /16\.000\.000|16000000|16,000,000/],
-  ])("no permite la vista previa con %s", async (_name, w, h, message) => {
+    ["un lado menor que el mínimo", "63", "64"],
+    ["un número con decimales", "400.6", "401"],
+    ["un campo vacío", "", "400"],
+  ])("al salir del campo, %s se ajusta", async (_name, typed, adjusted) => {
+    await ready();
+
+    fireEvent.focus(width());
+    fireEvent.change(width(), { target: { value: typed } });
+    // Mientras escribe no se corrige: 1 puede ser el comienzo de 120.
+    expect(width().value).toBe(typed);
+    fireEvent.blur(width());
+
+    expect(width().value).toBe(adjusted);
+    noRangeError();
+  });
+
+  it("el lado que se cambia se ajusta para no superar el total de píxeles", async () => {
+    await ready();
+
+    fireEvent.change(width(), { target: { value: "5000" } });
+    fireEvent.change(height(), { target: { value: "5000" } });
+
+    // 16.000.000 / 5000 = 3200.
+    expect(width().value).toBe("5000");
+    expect(height().value).toBe("3200");
+    noRangeError();
+  });
+
+  it("la vista previa envía el valor ajustado aunque el campo siga a medio escribir", async () => {
     const calls = await ready();
 
-    fireEvent.change(width(), { target: { value: w } });
-    fireEvent.change(height(), { target: { value: h } });
-
-    expect(previewButton().disabled).toBe(true);
-    expect(screen.getByText(message)).toBeTruthy();
+    fireEvent.change(width(), { target: { value: "63" } });
+    expect(previewButton().disabled).toBe(false);
     fireEvent.click(previewButton());
-    expect(posts(calls).some((c) => c.url === "/api/jobs/preview")).toBe(false);
+    await screen.findByText("foto1.jpg");
+
+    const post = posts(calls).find((c) => c.url === "/api/jobs/preview")!;
+    expect(JSON.parse(post.init!.body as string).options.width).toBe(64);
+  });
+
+  describe("arrastrar sobre el número", () => {
+    const drag = (input: HTMLInputElement, dx: number, init: PointerEventInit = {}) => {
+      fireEvent.pointerDown(input, { pointerId: 1, button: 0, clientX: 100, ...init });
+      fireEvent.pointerMove(input, { pointerId: 1, clientX: 100 + dx, ...init });
+      fireEvent.pointerUp(input, { pointerId: 1, clientX: 100 + dx, ...init });
+    };
+
+    it("a la derecha sube y a la izquierda baja, de a 10", async () => {
+      await ready();
+
+      drag(width(), 40);
+      expect(width().value).toBe("600");
+
+      drag(height(), -40);
+      expect(height().value).toBe("200");
+    });
+
+    it("con Mayúsculas el ajuste es fino, de a 1", async () => {
+      await ready();
+
+      drag(width(), 40, { shiftKey: true });
+
+      expect(width().value).toBe("440");
+    });
+
+    it("no pasa de los límites", async () => {
+      await ready();
+
+      drag(width(), -5000);
+      expect(width().value).toBe("64");
+
+      drag(width(), 50000);
+      expect(width().value).toBe("6000");
+    });
+
+    it("sigue funcionando si el mouse sale rápido del campo", async () => {
+      await ready();
+
+      // Un movimiento brusco: el primer evento ya ocurre fuera del campo.
+      fireEvent.pointerDown(height(), { pointerId: 1, button: 0, clientX: 200 });
+      fireEvent.pointerMove(document.body, { pointerId: 1, clientX: 60 });
+      fireEvent.pointerUp(document.body, { pointerId: 1, clientX: 60 });
+
+      expect(height().value).toBe("64");
+    });
+
+    it("un clic sin moverse no cambia el número: sirve para escribir", async () => {
+      await ready();
+
+      drag(width(), 2);
+
+      expect(width().value).toBe("400");
+    });
+
+    it("cambia la opción como si se hubiera escrito", async () => {
+      const calls = await ready();
+
+      drag(width(), 40);
+      fireEvent.click(previewButton());
+      await screen.findByText("foto1.jpg");
+
+      const post = posts(calls).find((c) => c.url === "/api/jobs/preview")!;
+      expect(JSON.parse(post.init!.body as string).options.width).toBe(600);
+    });
+
+    it("no hace nada con el campo deshabilitado", async () => {
+      mockApi({ current: job({ kind: "run", status: "running", summary: null }) });
+      renderApp();
+      await waitFor(() => expect(width().disabled).toBe(true));
+      const before = width().value;
+
+      drag(width(), 40);
+
+      expect(width().value).toBe(before);
+    });
   });
 
   it("cambiar una opción oculta la vista previa anterior", async () => {
@@ -1130,7 +1255,7 @@ describe("lienzo de ejemplo", () => {
     );
   });
 
-  it("con medidas inválidas no pide un ejemplo", async () => {
+  it("con un lado a medio escribir, el ejemplo usa el tamaño ya ajustado", async () => {
     mockApi({ routes: { "/api/folders/verify": verified } });
     renderApp(folders);
     await selectAndVerify();
@@ -1138,7 +1263,8 @@ describe("lienzo de ejemplo", () => {
 
     fireEvent.change(screen.getByLabelText(/ancho/i), { target: { value: "10" } });
 
-    await waitFor(() => expect(screen.queryByAltText(/ejemplo de resultado/i)).toBeNull());
+    // Es el tamaño que se enviaría: 10 todavía no es válido, el mínimo sí.
+    expect(await screen.findByAltText(/ejemplo de resultado de 64 × 400 px/i)).toBeTruthy();
   });
 
   it("sin fotos todavía, muestra un producto de muestra y lo explica", async () => {

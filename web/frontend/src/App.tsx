@@ -23,7 +23,7 @@ import {
 } from "./google/picker";
 import JobPanel, { LastJob, nameLength } from "./Job";
 import SampleCanvas from "./Sample";
-import OutputForm, { draftFrom, optionsFrom, outputProblem, type OutputDraft } from "./Output";
+import OutputForm, { draftFrom, fitDraft, optionsFrom, type OutputDraft } from "./Output";
 import exampleOriginal from "./assets/ejemplo-original.webp";
 import exampleResult from "./assets/ejemplo-resultado.webp";
 import "./styles.css";
@@ -73,7 +73,8 @@ export default function App({
   const authorizing = connection ? AUTHORIZING_STEP[connection.state] : undefined;
   const jobRunning = job?.status === "running";
   const limits = status?.output;
-  const problem_ = output && limits ? outputProblem(output, limits) : null;
+  // Lo que se envía y se muestra: el tamaño siempre dentro de los límites.
+  const fitted = output && limits ? fitDraft(output, limits) : null;
 
   // Los valores por defecto los informa el backend (los del motor).
   useEffect(() => {
@@ -210,8 +211,9 @@ export default function App({
   const preview = () =>
     run(async () => {
       const targetId = sameFolder ? source?.id : target?.id;
-      if (!source || !targetId || !output || problem_) return;
-      setJob(await startPreview(csrf, source.id, targetId, optionsFrom(output)));
+      if (!source || !targetId || !fitted) return;
+      setOutput(fitted);
+      setJob(await startPreview(csrf, source.id, targetId, optionsFrom(fitted)));
     });
 
   const changeOutput = (draft: OutputDraft) => {
@@ -395,7 +397,7 @@ export default function App({
         <Section
           number={2}
           title="Resultado"
-          done={Boolean(verification) && Boolean(output) && !problem_}
+          done={Boolean(verification) && Boolean(output)}
           locked={!verification}
         >
           {!verification && (
@@ -406,7 +408,6 @@ export default function App({
               draft={output}
               limits={limits}
               disabled={jobRunning || !verification}
-              problem={problem_}
               onChange={changeOutput}
             />
           )}
@@ -419,7 +420,7 @@ export default function App({
               <button
                 className={job ? "large" : "primary large"}
                 onClick={preview}
-                disabled={busy || Boolean(problem_) || !output}
+                disabled={busy || !output}
               >
                 Ver vista previa
               </button>
@@ -452,12 +453,12 @@ export default function App({
           <div
             className="stage-ready"
             style={
-              output && !problem_
-                ? { ["--ratio" as string]: String(Number(output.width) / Number(output.height)) }
+              fitted
+                ? { ["--ratio" as string]: String(Number(fitted.width) / Number(fitted.height)) }
                 : undefined
             }
           >
-            {output && !problem_ && <SampleCanvas options={optionsFrom(output)} />}
+            {fitted && <SampleCanvas options={optionsFrom(fitted)} />}
             <div className="stage-side">
               <div className="stage-note">
                 <h2>Todo listo para la vista previa</h2>
